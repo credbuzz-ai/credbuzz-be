@@ -1,0 +1,16 @@
+{
+  "name": "marketplace",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.13",
+    "hardhat": "^2.22.19",
+    "solidity-coverage": "^0.8.14"
+  },
+  "scripts": {
+    "deploy": "npx hardhat clean && npx hardhat ignition deploy ignition/modules/Marketplace.ts --network localhost"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0",
+    "dotenv": "^16.4.7"
+  }
+}
