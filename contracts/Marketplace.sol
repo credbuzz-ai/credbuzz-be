@@ -49,8 +49,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
     address public immutable baseUsdcAddress =
-        0xB57ee0797C3fc0205714a577c02F7205bB89dF30;
+        0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint256 public immutable baseUsdcDecimals = 6;
+    mapping(uint256 => bytes4) campaignInfoDB;
 
     // ------------------ VARIABLES ------------------
     address[] public allUsers;
@@ -94,14 +95,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
         _;
     }
 
-    modifier campaignNotDiscarded(bytes4 campaignId) {
-        Campaign memory campaign = campaignInfo[campaignId];
-        if (campaign.campaignStatus == CampaignStatus.DISCARDED) {
-            revert CampaignDiscarded();
-        }
-        _;
-    }
-
     // ------------------ CONSTRUCTOR ------------------
     // 10000 for 10%
     constructor() Ownable(msg.sender) {
@@ -113,7 +106,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
         address usdcAddress = baseUsdcAddress;
         uint256 balance = IERC20(usdcAddress).balanceOf(address(this));
 
-        IERC20(usdcAddress).transfer(owner(), balance);
+        bool success = IERC20(usdcAddress).transfer(owner(), balance);
+        if (!success) {
+            revert FundTransferError();
+        }
     }
 
     function updatePlatformFees(uint256 newFees) external onlyOwner {
@@ -123,12 +119,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
-    function discardCampaign(bytes4 campaignId)
-        external
-        onlyOwner
-        nonReentrant
-        campaignNotDiscarded(campaignId)
-    {
+    function discardCampaign(uint idInDB) external onlyOwner nonReentrant {
+        bytes4 campaignId = campaignInfoDB[idInDB];
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 usdc = IERC20(baseUsdcAddress);
@@ -142,7 +134,13 @@ contract Marketplace is Ownable, ReentrancyGuard {
 
         campaign.campaignStatus = CampaignStatus.DISCARDED;
 
-        usdc.transfer(campaign.creatorAddress, campaign.amountOffered);
+        bool success = usdc.transfer(
+            campaign.creatorAddress,
+            campaign.amountOffered
+        );
+        if (!success) {
+            revert FundTransferError();
+        }
 
         emit CampaignUpdated(campaignId, msg.sender);
     }
@@ -160,7 +158,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
         address selectedKol,
         uint256 offeringAmount,
         uint256 promotionEndsIn,
-        uint256 offerEndsIn
+        uint256 offerEndsIn,
+        uint idInDB
     ) external isRegisteredCheck {
         // @audit: this call could be done from frontend
         // Transfer USDC from creator to owner (Frontend -> creator -> owner)
@@ -176,6 +175,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
                 )
             )
         );
+
+        campaignInfoDB[idInDB] = id;
 
         uint256 currentTime = block.timestamp;
         Campaign memory campaign = Campaign({
@@ -199,12 +200,13 @@ contract Marketplace is Ownable, ReentrancyGuard {
     }
 
     function updateCampaign(
-        bytes4 campaignId,
+        uint idInDB,
         address selectedKol,
         uint256 promotionEndsIn,
         uint256 offerEndsIn,
-        uint newAmountOffered
+        uint256 newAmountOffered
     ) external isRegisteredCheck {
+        bytes4 campaignId = campaignInfoDB[idInDB];
         require(selectedKol != address(0), "Invalid KOL address");
         Campaign storage campaign = campaignInfo[campaignId];
 
@@ -225,19 +227,22 @@ contract Marketplace is Ownable, ReentrancyGuard {
 
         IERC20 usdc = IERC20(baseUsdcAddress);
 
-        if(campaign.amountOffered > newAmountOffered){
+        if (campaign.amountOffered > newAmountOffered) {
             // return the extra
-            usdc.transfer(campaign.creatorAddress, campaign.amountOffered - newAmountOffered);
+            bool success = usdc.transfer(
+                campaign.creatorAddress,
+                campaign.amountOffered - newAmountOffered
+            );
+            if (!success) {
+                revert FundTransferError();
+            }
         }
 
         emit CampaignUpdated(campaignId, msg.sender);
     }
 
-    function acceptProjectCampaign(bytes4 campaignId)
-        external
-        campaignNotDiscarded(campaignId)
-        nonReentrant
-    {
+    function acceptProjectCampaign(uint campaignIdDb) external nonReentrant {
+        bytes4 campaignId = campaignInfoDB[campaignIdDb];
         Campaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.campaignStatus != CampaignStatus.OPEN) {
@@ -252,11 +257,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit CampaignAccepted(campaignId, msg.sender);
     }
 
-    function fulfilProjectCampaign(bytes4 campaignId)
-        external
-        campaignNotDiscarded(campaignId)
-        nonReentrant
-    {
+    function fulfilProjectCampaign(uint campaignIdDB) external nonReentrant {
+        bytes4 campaignId = campaignInfoDB[campaignIdDB];
         Campaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.campaignStatus != CampaignStatus.ACCEPTED) {
@@ -283,14 +285,20 @@ contract Marketplace is Ownable, ReentrancyGuard {
 
         address usdcAddress = baseUsdcAddress;
 
-        IERC20(usdcAddress).transfer(
+        bool kolTransfer = IERC20(usdcAddress).transfer(
             campaign.selectedKol,
             amountToPayKol
         );
-        IERC20(usdcAddress).transfer(
+        if (!kolTransfer) {
+            revert FundTransferError();
+        }
+        bool ownerTransfer = IERC20(usdcAddress).transfer(
             owner(),
             platformFees
         );
+        if (!ownerTransfer) {
+            revert FundTransferError();
+        }
 
         emit CampaignFulfilled(campaignId);
     }
@@ -305,19 +313,16 @@ contract Marketplace is Ownable, ReentrancyGuard {
         return allCampaigns;
     }
 
-    function getUserCampaigns(address userAddress)
-        external
-        view
-        returns (bytes4[] memory)
-    {
+    function getUserCampaigns(
+        address userAddress
+    ) external view returns (bytes4[] memory) {
         return userCampaigns[userAddress];
     }
 
-    function getCampaignInfo(bytes4 id)
-        external
-        view
-        returns (Campaign memory)
-    {
+    function getCampaignInfo(
+        uint idInDB
+    ) external view returns (Campaign memory) {
+        bytes4 id = campaignInfoDB[idInDB];
         Campaign memory campaign = campaignInfo[id];
         return campaign;
     }
