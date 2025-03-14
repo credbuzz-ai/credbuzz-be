@@ -10,9 +10,9 @@ struct Campaign {
     uint256 createdAt;
     address creatorAddress;
     address selectedKol;
-    uint offerEndsIn;
-    uint promotionEndsIn;
-    uint amountOffered;
+    uint256 offerEndsIn;
+    uint256 promotionEndsIn;
+    uint256 amountOffered;
     CampaignStatus campaignStatus;
 }
 
@@ -49,7 +49,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
     address public immutable baseUsdcAddress =
-        0xa513E6E4b8f2a923D98304ec87F64353C4D5C853;
+        0xB57ee0797C3fc0205714a577c02F7205bB89dF30;
     uint256 public immutable baseUsdcDecimals = 6;
 
     // ------------------ VARIABLES ------------------
@@ -109,6 +109,13 @@ contract Marketplace is Ownable, ReentrancyGuard {
     }
 
     // ------------------ OWNER FUNCTIONS ------------------
+    function withdrawUsdc() external onlyOwner {
+        address usdcAddress = baseUsdcAddress;
+        uint256 balance = IERC20(usdcAddress).balanceOf(address(this));
+
+        IERC20(usdcAddress).transfer(owner(), balance);
+    }
+
     function updatePlatformFees(uint256 newFees) external onlyOwner {
         uint256 oldFees = platformFeesPercentage;
         platformFeesPercentage = newFees;
@@ -116,9 +123,12 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
-    function discardCampaign(
-        bytes4 campaignId
-    ) external onlyOwner nonReentrant campaignNotDiscarded(campaignId) {
+    function discardCampaign(bytes4 campaignId)
+        external
+        onlyOwner
+        nonReentrant
+        campaignNotDiscarded(campaignId)
+    {
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 usdc = IERC20(baseUsdcAddress);
@@ -132,70 +142,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
 
         campaign.campaignStatus = CampaignStatus.DISCARDED;
 
+        usdc.transfer(campaign.creatorAddress, campaign.amountOffered);
+
         emit CampaignUpdated(campaignId, msg.sender);
-    }
-
-    function acceptProjectCampaign(
-        bytes4 campaignId
-    ) external onlyOwner campaignNotDiscarded(campaignId) nonReentrant {
-        Campaign storage campaign = campaignInfo[campaignId];
-
-        if (campaign.campaignStatus != CampaignStatus.OPEN) {
-            revert InvalidCampaignStatus(
-                CampaignStatus.OPEN,
-                campaign.campaignStatus
-            );
-        }
-
-        // @audit: this is a fallback check, the campaign status will need constant updation from backend & frontend handling too
-        uint256 currentTime = block.timestamp;
-
-        if (currentTime > campaign.offerEndsIn) {
-            campaign.campaignStatus = CampaignStatus.DISCARDED;
-
-            // @audit: USDC transfer need to implement here (from backend -> owner -> project creator)
-
-            emit AcceptanceDeadlineReached(campaignId);
-            emit ProjectPaymentReturned(campaignId);
-
-            return;
-        }
-
-        campaign.campaignStatus = CampaignStatus.ACCEPTED;
-
-        emit CampaignAccepted(campaignId, msg.sender);
-    }
-
-    function fulfilProjectCampaign(
-        bytes4 campaignId
-    ) external onlyOwner campaignNotDiscarded(campaignId) nonReentrant {
-        Campaign storage campaign = campaignInfo[campaignId];
-
-        if (campaign.campaignStatus != CampaignStatus.ACCEPTED) {
-            revert InvalidCampaignStatus(
-                CampaignStatus.ACCEPTED,
-                campaign.campaignStatus
-            );
-        }
-
-        uint256 campaignOffering = campaign.amountOffered;
-        uint256 platformFees = (campaignOffering * platformFeesPercentage) /
-            divider;
-        uint256 amountToPayKol = campaignOffering - platformFees;
-        IERC20 usdc = IERC20(baseUsdcAddress);
-
-        if (usdc.balanceOf(owner()) < amountToPayKol) {
-            revert ContractBalanceInsufficient(
-                amountToPayKol,
-                usdc.balanceOf(owner())
-            );
-        }
-
-        campaign.campaignStatus = CampaignStatus.FULFILLED;
-
-        // @audit: USDC transfer need to implement here (from backend -> owner -> kol)
-
-        emit CampaignFulfilled(campaignId);
     }
 
     // ------------------ USER SIGNUP ------------------
@@ -228,7 +177,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
             )
         );
 
-        uint currentTime = block.timestamp;
+        uint256 currentTime = block.timestamp;
         Campaign memory campaign = Campaign({
             id: id,
             createdAt: currentTime,
@@ -253,7 +202,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
         bytes4 campaignId,
         address selectedKol,
         uint256 promotionEndsIn,
-        uint256 offerEndsIn
+        uint256 offerEndsIn,
+        uint newAmountOffered
     ) external isRegisteredCheck {
         require(selectedKol != address(0), "Invalid KOL address");
         Campaign storage campaign = campaignInfo[campaignId];
@@ -273,7 +223,76 @@ contract Marketplace is Ownable, ReentrancyGuard {
         campaign.promotionEndsIn = promotionEndsIn;
         campaign.offerEndsIn = offerEndsIn;
 
+        IERC20 usdc = IERC20(baseUsdcAddress);
+
+        if(campaign.amountOffered > newAmountOffered){
+            // return the extra
+            usdc.transfer(campaign.creatorAddress, campaign.amountOffered - newAmountOffered);
+        }
+
         emit CampaignUpdated(campaignId, msg.sender);
+    }
+
+    function acceptProjectCampaign(bytes4 campaignId)
+        external
+        campaignNotDiscarded(campaignId)
+        nonReentrant
+    {
+        Campaign storage campaign = campaignInfo[campaignId];
+
+        if (campaign.campaignStatus != CampaignStatus.OPEN) {
+            revert InvalidCampaignStatus(
+                CampaignStatus.OPEN,
+                campaign.campaignStatus
+            );
+        }
+
+        campaign.campaignStatus = CampaignStatus.ACCEPTED;
+
+        emit CampaignAccepted(campaignId, msg.sender);
+    }
+
+    function fulfilProjectCampaign(bytes4 campaignId)
+        external
+        campaignNotDiscarded(campaignId)
+        nonReentrant
+    {
+        Campaign storage campaign = campaignInfo[campaignId];
+
+        if (campaign.campaignStatus != CampaignStatus.ACCEPTED) {
+            revert InvalidCampaignStatus(
+                CampaignStatus.ACCEPTED,
+                campaign.campaignStatus
+            );
+        }
+
+        uint256 campaignOffering = campaign.amountOffered;
+        uint256 platformFees = (campaignOffering * platformFeesPercentage) /
+            divider;
+        uint256 amountToPayKol = campaignOffering - platformFees;
+        IERC20 usdc = IERC20(baseUsdcAddress);
+
+        if (usdc.balanceOf(address(this)) < amountToPayKol) {
+            revert ContractBalanceInsufficient(
+                amountToPayKol,
+                usdc.balanceOf(owner())
+            );
+        }
+
+        campaign.campaignStatus = CampaignStatus.FULFILLED;
+
+        address usdcAddress = baseUsdcAddress;
+
+        IERC20(usdcAddress).transfer(
+            campaign.selectedKol,
+            amountToPayKol
+        );
+        IERC20(usdcAddress).transfer(
+            owner(),
+            platformFees
+        );
+
+        emit CampaignFulfilled(campaignId);
     }
 
     // ------------------ GETTERS ------------------
@@ -286,15 +305,19 @@ contract Marketplace is Ownable, ReentrancyGuard {
         return allCampaigns;
     }
 
-    function getUserCampaigns(
-        address userAddress
-    ) external view returns (bytes4[] memory) {
+    function getUserCampaigns(address userAddress)
+        external
+        view
+        returns (bytes4[] memory)
+    {
         return userCampaigns[userAddress];
     }
 
-    function getCampaignInfo(
-        bytes4 id
-    ) external view returns (Campaign memory) {
+    function getCampaignInfo(bytes4 id)
+        external
+        view
+        returns (Campaign memory)
+    {
         Campaign memory campaign = campaignInfo[id];
         return campaign;
     }
