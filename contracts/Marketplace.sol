@@ -112,6 +112,15 @@ contract Marketplace is Ownable, ReentrancyGuard {
         }
     }
 
+    function withdrawEth() external onlyOwner {
+        uint256 balance = address(this).balance;
+
+        (bool success, ) = payable(owner()).call{value: balance}("");
+        if (!success) {
+            revert FundTransferError();
+        }
+    }
+
     function updatePlatformFees(uint256 newFees) external onlyOwner {
         uint256 oldFees = platformFeesPercentage;
         platformFeesPercentage = newFees;
@@ -125,10 +134,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 usdc = IERC20(baseUsdcAddress);
 
-        if (usdc.balanceOf(owner()) < amountToReturn) {
+        if (usdc.balanceOf(address(this)) < amountToReturn) {
             revert ContractBalanceInsufficient(
                 amountToReturn,
-                usdc.balanceOf(owner())
+                usdc.balanceOf(address(this))
             );
         }
 
@@ -205,7 +214,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 promotionEndsIn,
         uint256 offerEndsIn,
         uint256 newAmountOffered
-    ) external isRegisteredCheck {
+    ) external isRegisteredCheck nonReentrant {
         bytes4 campaignId = campaignInfoDB[idInDB];
         require(selectedKol != address(0), "Invalid KOL address");
         Campaign storage campaign = campaignInfo[campaignId];
@@ -245,6 +254,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
         bytes4 campaignId = campaignInfoDB[campaignIdDb];
         Campaign storage campaign = campaignInfo[campaignId];
 
+        if (campaign.selectedKol != msg.sender) {
+            revert Unauthorized();
+        }
+
         if (campaign.campaignStatus != CampaignStatus.OPEN) {
             revert InvalidCampaignStatus(
                 CampaignStatus.OPEN,
@@ -277,7 +290,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         if (usdc.balanceOf(address(this)) < amountToPayKol) {
             revert ContractBalanceInsufficient(
                 amountToPayKol,
-                usdc.balanceOf(owner())
+                usdc.balanceOf(address(this))
             );
         }
 
@@ -326,4 +339,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
         Campaign memory campaign = campaignInfo[id];
         return campaign;
     }
+
+    receive() external payable {}
 }
