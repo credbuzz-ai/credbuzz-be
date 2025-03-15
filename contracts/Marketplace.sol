@@ -49,7 +49,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
     address public immutable baseUsdcAddress =
-        0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9;
+        0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint256 public immutable baseUsdcDecimals = 6;
     mapping(uint256 => bytes4) campaignInfoDB;
 
