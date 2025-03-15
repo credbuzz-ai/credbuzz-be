@@ -41,7 +41,6 @@ owner = w3.eth.account.from_key(private_key)
 def get_campaign_info(campaign_id: int):
     try:
         campaign_info = marketplace_contract.functions.getCampaignInfo(campaign_id).call()
-        print(f"Campaign info: {campaign_info}")
         return campaign_info
     except Exception as e:
         raise Exception(f"Transaction failed: {str(e)}")
@@ -64,17 +63,12 @@ def discard_campaign(campaign_id: int):
         raise Exception(f"Error discarding campaign {campaign_id}: {str(e)}")
 
 def handle_campaign(campaign_id: int):
-    print(f"Processing campaign {campaign_id}")
-    
+    print(f"\n\nProcessing campaign {campaign_id}")
     try:
         # get campaign info
         campaign_info = get_campaign_info(campaign_id)
+        print(f"Campaign info: {campaign_info}")
         
-        if campaign_info[1] != campaign_id:
-            print(f"INVALID CAMPAIGN ID: {campaign_id}")
-            print(f"--------------------------------\n\n")
-            return
-
         # extract data
         status = campaign_info[7]
         current_nonce = w3.eth.get_transaction_count(owner.address)
@@ -82,9 +76,11 @@ def handle_campaign(campaign_id: int):
 
         if status == 0:  # OPEN 
             # check for the offer time and curretn time
-            offer_time = int(campaign_info[4] / 1000)
-            current_time = w3.eth.get_block('latest').timestamp
-            
+            offer_time = int(campaign_info[4] / 1000)  # Convert ms to sec
+            # current_time = w3.eth.get_block('latest').timestamp
+            current_time = int(time.time())
+            print(f"Offer time: {offer_time}, Current time: {current_time}")
+
             if current_time > offer_time:
                 # discard the campaign
                 discard_txn = marketplace_contract.functions.discardCampaign(campaign_id).build_transaction({
@@ -94,11 +90,13 @@ def handle_campaign(campaign_id: int):
                 print(f"Discarded campaign as offer time ended {campaign_id}")
                 discard_campaign(campaign_id)
             else:
-                print(f"Offer time not ended for campaign {campaign_id}")
+                print(f"Offer time not ended for campaign {campaign_id}\n\n")
                 
         elif status == 1:  # ACCEPTED 
-            promotion_end_time = int(campaign_info[5] / 1000)
-            current_time = w3.eth.get_block('latest').timestamp
+            promotion_end_time = int(campaign_info[5] / 1000) 
+            # current_time = w3.eth.get_block('latest').timestamp
+            current_time = int(time.time())
+            print(f"Promotion end time: {promotion_end_time}, Current time: {current_time}")
             if current_time > promotion_end_time:
                 # fulfill the campaign
                 discard_txn = marketplace_contract.functions.discardCampaign(campaign_id).build_transaction({
