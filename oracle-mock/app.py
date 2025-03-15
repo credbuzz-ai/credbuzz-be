@@ -8,8 +8,8 @@ import requests
 # Load environment variables
 load_dotenv()
 
-rpc_url = os.getenv('RPC_URL')
-private_key = os.getenv('PRIVATE_KEY')
+rpc_url = os.getenv('BASE_ALCHEMY_RPC_URL')
+private_key = os.getenv('BASE_PRIVATE_KEY')
 marketplace_address = os.getenv('MARKETPLACE_ADDRESS')
 usdc_address = os.getenv('USDC_ADDRESS')
 marketplace_abi_path = os.getenv('MARKETPLACE_ABI_PATH')

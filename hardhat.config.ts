@@ -19,7 +19,7 @@ const config: HardhatUserConfig = {
     apiKey: {
       "base-mainnet": process.env.BASESCAN_API_KEY || "",
     },
-    enabled: false,
+    enabled: true,
     customChains: [
       {
         network: "base-mainnet",
@@ -36,13 +36,13 @@ const config: HardhatUserConfig = {
       chainId: 31337,
       url: "http://127.0.0.1:8545",
     },
-    // base: {
-    //   url: process.env.BASE_ALCHEMY_RPC_URL,
-    //   chainId: 8453,
-    //   accounts: process.env.BASE_PRIVATE_KEY
-    //     ? [process.env.BASE_PRIVATE_KEY]
-    //     : [],
-    // },
+    base: {
+      url: process.env.BASE_ALCHEMY_RPC_URL,
+      chainId: 8453,
+      accounts: process.env.BASE_PRIVATE_KEY
+        ? [process.env.BASE_PRIVATE_KEY]
+        : [],
+    },
   },
 };
 

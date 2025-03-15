@@ -233,21 +233,22 @@ contract Marketplace is Ownable, ReentrancyGuard {
         campaign.selectedKol = selectedKol;
         campaign.promotionEndsIn = promotionEndsIn;
         campaign.offerEndsIn = offerEndsIn;
+        campaign.amountOffered = newAmountOffered;
+
+        uint amountToCompare = campaign.amountOffered;
 
         IERC20 usdc = IERC20(baseUsdcAddress);
 
-        if (campaign.amountOffered > newAmountOffered) {
+        if (amountToCompare > newAmountOffered) {
             // return the extra
             bool success = usdc.transfer(
                 campaign.creatorAddress,
-                campaign.amountOffered - newAmountOffered
+                amountToCompare - newAmountOffered
             );
             if (!success) {
                 revert FundTransferError();
             }
         }
-
-        campaign.amountOffered = newAmountOffered;
 
         emit CampaignUpdated(campaignId, msg.sender);
     }
