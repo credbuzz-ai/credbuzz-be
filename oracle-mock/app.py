@@ -70,8 +70,9 @@ def handle_campaign(campaign_id: int):
         # get campaign info
         campaign_info = get_campaign_info(campaign_id)
         
-        if campaign_info[1] == campaign_id:
+        if campaign_info[1] != campaign_id:
             print(f"INVALID CAMPAIGN ID: {campaign_id}")
+            print(f"--------------------------------\n\n")
             return
 
         # extract data
