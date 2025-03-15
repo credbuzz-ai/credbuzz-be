@@ -97,7 +97,7 @@ def handle_campaign(campaign_id: int):
                 print(f"Offer time not ended for campaign {campaign_id}")
                 
         elif status == 1:  # ACCEPTED 
-            promotion_end_time = campaign_info[5]
+            promotion_end_time = int(campaign_info[5] / 1000)
             current_time = w3.eth.get_block('latest').timestamp
             if current_time > promotion_end_time:
                 # fulfill the campaign
