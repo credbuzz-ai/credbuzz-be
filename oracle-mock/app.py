@@ -143,6 +143,6 @@ if __name__ == "__main__":
         print("\n\nProcessing campaigns...")
         process_campaigns()
         print("Campaigns processed")
-        print("Sleeping for 10 seconds...")
+        print("Sleeping for 60 seconds...")
         print("--------------------------------")
-        time.sleep(10)
+        time.sleep(60)
