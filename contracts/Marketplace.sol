@@ -49,7 +49,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
     address public immutable baseUsdcAddress =
-        0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+        0x5FbDB2315678afecb367f032d93F642f64180aa3;
     uint256 public immutable baseUsdcDecimals = 6;
     mapping(uint256 => bytes4) campaignInfoDB;
 
@@ -230,20 +230,20 @@ contract Marketplace is Ownable, ReentrancyGuard {
             revert Unauthorized();
         }
 
+        uint oldAmount = campaign.amountOffered;
+
         campaign.selectedKol = selectedKol;
         campaign.promotionEndsIn = promotionEndsIn;
         campaign.offerEndsIn = offerEndsIn;
         campaign.amountOffered = newAmountOffered;
 
-        uint amountToCompare = campaign.amountOffered;
-
         IERC20 usdc = IERC20(baseUsdcAddress);
 
-        if (amountToCompare > newAmountOffered) {
+        if (oldAmount > newAmountOffered) {
             // return the extra
             bool success = usdc.transfer(
                 campaign.creatorAddress,
-                amountToCompare - newAmountOffered
+                oldAmount - newAmountOffered
             );
             if (!success) {
                 revert FundTransferError();

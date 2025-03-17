@@ -8,8 +8,10 @@ import requests
 # Load environment variables
 load_dotenv()
 
-rpc_url = os.getenv('BASE_ALCHEMY_RPC_URL')
-private_key = os.getenv('BASE_PRIVATE_KEY')
+# rpc_url = os.getenv('BASE_ALCHEMY_RPC_URL')
+# private_key = os.getenv('BASE_PRIVATE_KEY')
+rpc_url = os.getenv('TEST_ALCHEMY_RPC_URL')
+private_key = os.getenv('TEST_PRIVATE_KEY')
 marketplace_address = os.getenv('MARKETPLACE_ADDRESS')
 usdc_address = os.getenv('USDC_ADDRESS')
 marketplace_abi_path = os.getenv('MARKETPLACE_ABI_PATH')
@@ -72,7 +74,11 @@ def handle_campaign(campaign_id: int):
         # extract data
         status = campaign_info[7]
         current_nonce = w3.eth.get_transaction_count(owner.address)
-
+        zero_address = '0x0000000000000000000000000000000000000000'
+        
+        if campaign_info[2] == zero_address:
+            print(f"Campaign {campaign_id} has no offer")
+            return
 
         if status == 0:  # OPEN 
             # check for the offer time and curretn time
@@ -96,7 +102,6 @@ def handle_campaign(campaign_id: int):
             promotion_end_time = int(campaign_info[5] / 1000) 
             # current_time = w3.eth.get_block('latest').timestamp
             current_time = int(time.time())
-            print(f"Promotion end time: {promotion_end_time}, Current time: {current_time}")
             if current_time > promotion_end_time:
                 # fulfill the campaign
                 discard_txn = marketplace_contract.functions.discardCampaign(campaign_id).build_transaction({
@@ -130,7 +135,7 @@ def process_campaigns():
         }
         response = requests.get(url, headers=headers)
         all_campaigns = response.json().get('result')
-
+        
         for campaign_id in all_campaigns:
             handle_campaign(campaign_id)
 
@@ -138,11 +143,12 @@ def process_campaigns():
         raise Exception(f"Error processing campaigns: {str(e)}")
 
 if __name__ == "__main__":
+    sleep_time = 10
 
     while True:
         print("\n\nProcessing campaigns...")
         process_campaigns()
         print("Campaigns processed")
-        print("Sleeping for 60 seconds...")
+        print(f"Sleeping for {sleep_time} seconds...")
         print("--------------------------------")
-        time.sleep(60)
+        time.sleep(sleep_time)

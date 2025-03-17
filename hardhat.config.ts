@@ -34,7 +34,6 @@ const config: HardhatUserConfig = {
   networks: {
     localhost: {
       chainId: 31337,
-      url: "http://127.0.0.1:8545",
     },
     base: {
       url: process.env.BASE_ALCHEMY_RPC_URL,
