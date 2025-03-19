@@ -49,9 +49,8 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
     address public immutable baseUsdcAddress =
-        0x5FbDB2315678afecb367f032d93F642f64180aa3;
+        0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     uint256 public immutable baseUsdcDecimals = 6;
-    mapping(uint256 => bytes4) campaignInfoDB;
 
     // ------------------ VARIABLES ------------------
     address[] public allUsers;
@@ -128,8 +127,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
-    function discardCampaign(uint256 idInDB) external onlyOwner nonReentrant {
-        bytes4 campaignId = campaignInfoDB[idInDB];
+    function discardCampaign(bytes4 campaignId) external onlyOwner nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 usdc = IERC20(baseUsdcAddress);
@@ -167,8 +165,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         address selectedKol,
         uint256 offeringAmount,
         uint256 promotionEndsIn,
-        uint256 offerEndsIn,
-        uint256 idInDB
+        uint256 offerEndsIn
     ) external isRegisteredCheck {
         // @audit: this call could be done from frontend
         // Transfer USDC from creator to owner (Frontend -> creator -> owner)
@@ -184,8 +181,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
                 )
             )
         );
-
-        campaignInfoDB[idInDB] = id;
 
         uint256 currentTime = block.timestamp;
         Campaign memory campaign = Campaign({
@@ -209,13 +204,12 @@ contract Marketplace is Ownable, ReentrancyGuard {
     }
 
     function updateCampaign(
-        uint256 idInDB,
+        bytes4 campaignId,
         address selectedKol,
         uint256 promotionEndsIn,
         uint256 offerEndsIn,
         uint256 newAmountOffered
     ) external isRegisteredCheck nonReentrant {
-        bytes4 campaignId = campaignInfoDB[idInDB];
         require(selectedKol != address(0), "Invalid KOL address");
         Campaign storage campaign = campaignInfo[campaignId];
 
@@ -237,6 +231,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         campaign.offerEndsIn = offerEndsIn;
         campaign.amountOffered = newAmountOffered;
 
+
         IERC20 usdc = IERC20(baseUsdcAddress);
 
         if (oldAmount > newAmountOffered) {
@@ -253,8 +248,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit CampaignUpdated(campaignId, msg.sender);
     }
 
-    function acceptProjectCampaign(uint256 campaignIdDb) external nonReentrant {
-        bytes4 campaignId = campaignInfoDB[campaignIdDb];
+    function acceptProjectCampaign(bytes4 campaignId) external nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.selectedKol != msg.sender) {
@@ -273,8 +267,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit CampaignAccepted(campaignId, msg.sender);
     }
 
-    function fulfilProjectCampaign(uint256 campaignIdDB) external nonReentrant {
-        bytes4 campaignId = campaignInfoDB[campaignIdDB];
+    function fulfilProjectCampaign(bytes4 campaignId) external nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.campaignStatus != CampaignStatus.ACCEPTED) {
@@ -336,10 +329,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
     }
 
     function getCampaignInfo(
-        uint256 idInDB
+        bytes4 campaignId
     ) external view returns (Campaign memory) {
-        bytes4 id = campaignInfoDB[idInDB];
-        Campaign memory campaign = campaignInfo[id];
+        Campaign memory campaign = campaignInfo[campaignId];
         return campaign;
     }
 

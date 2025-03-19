@@ -8,10 +8,10 @@ import requests
 # Load environment variables
 load_dotenv()
 
-# rpc_url = os.getenv('BASE_ALCHEMY_RPC_URL')
-# private_key = os.getenv('BASE_PRIVATE_KEY')
-rpc_url = os.getenv('TEST_ALCHEMY_RPC_URL')
-private_key = os.getenv('TEST_PRIVATE_KEY')
+rpc_url = os.getenv('BASE_ALCHEMY_RPC_URL')
+private_key = os.getenv('BASE_PRIVATE_KEY')
+# rpc_url = os.getenv('TEST_ALCHEMY_RPC_URL')
+# private_key = os.getenv('TEST_PRIVATE_KEY')
 marketplace_address = os.getenv('MARKETPLACE_ADDRESS')
 usdc_address = os.getenv('USDC_ADDRESS')
 marketplace_abi_path = os.getenv('MARKETPLACE_ABI_PATH')
@@ -52,11 +52,9 @@ def discard_campaign(campaign_id: int):
         url = f"{os.getenv('BASE_URL')}/update-campaign"
         headers = {
             "Content-Type": "application/json",
-            "x-api-key": os.getenv('TEST_API_KEY'),
-            "source": os.getenv('SOURCE')
         }
         body = {
-            "campaign_id": campaign_id,
+            "campaign_id": str(campaign_id),
             "status": 'discarded'
         }
         response = requests.post(url, json=body, headers=headers)
@@ -87,7 +85,7 @@ def handle_campaign(campaign_id: int):
             current_time = int(time.time())
             print(f"Offer time: {offer_time}, Current time: {current_time}")
 
-            if current_time > offer_time:
+            if current_time > offer_time or offer_time > current_time:
                 # discard the campaign
                 discard_txn = marketplace_contract.functions.discardCampaign(campaign_id).build_transaction({
                     'from': owner.address, 'nonce': current_nonce, 'gas': 100000, 'gasPrice': w3.eth.gas_price
@@ -127,14 +125,9 @@ def sign_and_send_txn(txn: dict):
 
 def process_campaigns():
     try:
-        url = f"{os.getenv('BASE_URL')}/get-all-campaigns"
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": os.getenv('TEST_API_KEY'),
-            "source": os.getenv('SOURCE')
-        }
-        response = requests.get(url, headers=headers)
-        all_campaigns = response.json().get('result')
+        all_campaigns = marketplace_contract.functions.getAllCampaigns().call()
+        print(f"All campaigns: {all_campaigns}\n\n")
+        
         
         for campaign_id in all_campaigns:
             handle_campaign(campaign_id)
@@ -143,7 +136,7 @@ def process_campaigns():
         raise Exception(f"Error processing campaigns: {str(e)}")
 
 if __name__ == "__main__":
-    sleep_time = 10
+    sleep_time = 30
 
     while True:
         print("\n\nProcessing campaigns...")
