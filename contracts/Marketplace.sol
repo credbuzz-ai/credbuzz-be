@@ -53,7 +53,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public immutable baseUsdcDecimals = 6;
 
     // ------------------ VARIABLES ------------------
-    address[] public allUsers;
     mapping(address => bool) isUserRegistered;
 
     bytes4[] allCampaigns;
@@ -77,22 +76,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
     event ProjectPaymentReturned(bytes4 campaignId);
     event AcceptanceDeadlineReached(bytes4 campaignId);
     event CampaignUpdated(bytes4 indexed campaignId, address updatedBy);
-
-    // ------------------ MODIFIERS ------------------
-
-    modifier isRegisteredCheck() {
-        if (!isUserRegistered[msg.sender]) {
-            revert UserNotRegistered(msg.sender);
-        }
-        _;
-    }
-
-    modifier isNotRegisteredCheck() {
-        if (isUserRegistered[msg.sender]) {
-            revert UserAlreadyRegistered(msg.sender);
-        }
-        _;
-    }
 
     // ------------------ CONSTRUCTOR ------------------
     // 10000 for 10%
@@ -127,7 +110,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
-    function discardCampaign(bytes4 campaignId) external onlyOwner nonReentrant {
+    function discardCampaign(
+        bytes4 campaignId
+    ) external onlyOwner nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 usdc = IERC20(baseUsdcAddress);
@@ -152,24 +137,13 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit CampaignUpdated(campaignId, msg.sender);
     }
 
-    // ------------------ USER SIGNUP ------------------
-
-    function register() external isNotRegisteredCheck {
-        isUserRegistered[msg.sender] = true;
-        allUsers.push(msg.sender);
-        emit UserCreated(msg.sender);
-    }
-
     // ------------------ CAMPAIGN FUNCTIONS ------------------
     function createNewCampaign(
         address selectedKol,
         uint256 offeringAmount,
         uint256 promotionEndsIn,
         uint256 offerEndsIn
-    ) external isRegisteredCheck {
-        // @audit: this call could be done from frontend
-        // Transfer USDC from creator to owner (Frontend -> creator -> owner)
-
+    ) external {
         bytes4 id = bytes4(
             bytes32(
                 keccak256(
@@ -209,7 +183,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 promotionEndsIn,
         uint256 offerEndsIn,
         uint256 newAmountOffered
-    ) external isRegisteredCheck nonReentrant {
+    ) external nonReentrant {
         require(selectedKol != address(0), "Invalid KOL address");
         Campaign storage campaign = campaignInfo[campaignId];
 
@@ -230,7 +204,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
         campaign.promotionEndsIn = promotionEndsIn;
         campaign.offerEndsIn = offerEndsIn;
         campaign.amountOffered = newAmountOffered;
-
 
         IERC20 usdc = IERC20(baseUsdcAddress);
 
@@ -313,10 +286,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
     }
 
     // ------------------ GETTERS ------------------
-
-    function getAllUsers() external view returns (address[] memory) {
-        return allUsers;
-    }
 
     function getAllCampaigns() external view returns (bytes4[] memory) {
         return allCampaigns;
