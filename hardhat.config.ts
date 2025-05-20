@@ -1,7 +1,7 @@
-import { HardhatUserConfig } from "hardhat/config";
-import "solidity-coverage";
 import "@nomicfoundation/hardhat-toolbox";
 import "@nomicfoundation/hardhat-verify";
+import { HardhatUserConfig } from "hardhat/config";
+import "solidity-coverage";
 
 import "dotenv/config";
 
