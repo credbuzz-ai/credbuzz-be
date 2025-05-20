@@ -13,6 +13,7 @@ struct Campaign {
     uint256 offerEndsIn;
     uint256 promotionEndsIn;
     uint256 amountOffered;
+    address tokenAddress;
     CampaignStatus campaignStatus;
 }
 
@@ -21,6 +22,21 @@ enum CampaignStatus {
     ACCEPTED,
     FULFILLED,
     UNFULFILLED,
+    DISCARDED
+}
+
+struct OpenCampaign {
+    bytes4 id;
+    address creatorAddress;
+    uint256 promotionEndsIn;
+    uint256 poolAmount;
+    OpenCampaignStatus campaignStatus;
+    address tokenAddress;
+}
+
+enum OpenCampaignStatus {
+    PUBLISHED,
+    FULFILLED,
     DISCARDED
 }
 
@@ -44,13 +60,20 @@ error CampaignDiscarded();
 // New error for contract balance check
 error ContractBalanceInsufficient(uint256 required, uint256 available);
 
+// New error for open campaign
+error InvalidOpenCampaignStatus(
+    OpenCampaignStatus expected,
+    OpenCampaignStatus actual
+);
+
 contract Marketplace is Ownable, ReentrancyGuard {
     // ------------------ GLOBAL CONSTANTS ------------------
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
-    address public immutable baseUsdcAddress =
-        0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    uint256 public immutable baseUsdcDecimals = 6;
+
+    mapping(address tokenAddress => bool isTokenAllowed) public allowedTokens;
+    mapping(address tokenAddress => uint256 tokenDecimals) public tokenDecimals;
+    address[] public allowedTokensList;
 
     // ------------------ VARIABLES ------------------
     mapping(address => bool) isUserRegistered;
@@ -58,6 +81,11 @@ contract Marketplace is Ownable, ReentrancyGuard {
     bytes4[] allCampaigns;
     mapping(address => bytes4[]) userCampaigns;
     mapping(bytes4 => Campaign) campaignInfo;
+
+    // New variables for open campaigns
+    bytes4[] allOpenCampaigns;
+    mapping(address => bytes4[]) userOpenCampaigns;
+    mapping(bytes4 => OpenCampaign) openCampaignInfo;
 
     // ------------------ EVENTS ------------------
     // PLATFORM EVENTS
@@ -77,18 +105,60 @@ contract Marketplace is Ownable, ReentrancyGuard {
     event AcceptanceDeadlineReached(bytes4 campaignId);
     event CampaignUpdated(bytes4 indexed campaignId, address updatedBy);
 
+    // New events for open campaigns
+    event OpenCampaignCreated(
+        bytes4 indexed campaignId,
+        address user,
+        uint256 poolAmount
+    );
+    event OpenCampaignCompleted(
+        bytes4 indexed campaignId,
+        address completedBy,
+        bool isFulfilled
+    );
+    event OpenCampaignUpdated(bytes4 indexed campaignId, address updatedBy);
+
     // ------------------ CONSTRUCTOR ------------------
     // 10000 for 10%
     constructor() Ownable(msg.sender) {
         platformFeesPercentage = 10_000;
+        // USDC Allowed by default
+        allowedTokens[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = true;
+        tokenDecimals[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = 18;
+        allowedTokensList.push(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
     }
 
     // ------------------ OWNER FUNCTIONS ------------------
-    function withdrawUsdc() external onlyOwner {
-        address usdcAddress = baseUsdcAddress;
-        uint256 balance = IERC20(usdcAddress).balanceOf(address(this));
+    function addAllowedToken(
+        address tokenAddress,
+        uint256 decimals
+    ) external onlyOwner {
+        allowedTokens[tokenAddress] = true;
+        tokenDecimals[tokenAddress] = decimals;
+        allowedTokensList.push(tokenAddress);
+    }
 
-        bool success = IERC20(usdcAddress).transfer(owner(), balance);
+    function removeAllowedToken(address tokenAddress) external onlyOwner {
+        allowedTokens[tokenAddress] = false;
+        for (uint256 i = 0; i < allowedTokensList.length; i++) {
+            if (allowedTokensList[i] == tokenAddress) {
+                allowedTokensList[i] = allowedTokensList[
+                    allowedTokensList.length - 1
+                ];
+                allowedTokensList.pop();
+                break;
+            }
+        }
+    }
+
+    function getAllowedTokens() external view returns (address[] memory) {
+        return allowedTokensList;
+    }
+
+    function withdrawToken(address tokenAddress) external onlyOwner {
+        uint256 balance = IERC20(tokenAddress).balanceOf(address(this));
+
+        bool success = IERC20(tokenAddress).transfer(owner(), balance);
         if (!success) {
             revert FundTransferError();
         }
@@ -115,18 +185,18 @@ contract Marketplace is Ownable, ReentrancyGuard {
     ) external onlyOwner nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
-        IERC20 usdc = IERC20(baseUsdcAddress);
+        IERC20 token = IERC20(campaign.tokenAddress);
 
-        if (usdc.balanceOf(address(this)) < amountToReturn) {
+        if (token.balanceOf(address(this)) < amountToReturn) {
             revert ContractBalanceInsufficient(
                 amountToReturn,
-                usdc.balanceOf(address(this))
+                token.balanceOf(address(this))
             );
         }
 
         campaign.campaignStatus = CampaignStatus.DISCARDED;
 
-        bool success = usdc.transfer(
+        bool success = token.transfer(
             campaign.creatorAddress,
             campaign.amountOffered
         );
@@ -142,8 +212,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
         address selectedKol,
         uint256 offeringAmount,
         uint256 promotionEndsIn,
-        uint256 offerEndsIn
+        uint256 offerEndsIn,
+        address tokenAddress
     ) external {
+        require(allowedTokens[tokenAddress], "Token not allowed");
         bytes4 id = bytes4(
             bytes32(
                 keccak256(
@@ -165,6 +237,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
             offerEndsIn: offerEndsIn,
             promotionEndsIn: promotionEndsIn,
             amountOffered: offeringAmount,
+            tokenAddress: tokenAddress,
             campaignStatus: CampaignStatus.OPEN
         });
 
@@ -205,11 +278,11 @@ contract Marketplace is Ownable, ReentrancyGuard {
         campaign.offerEndsIn = offerEndsIn;
         campaign.amountOffered = newAmountOffered;
 
-        IERC20 usdc = IERC20(baseUsdcAddress);
+        IERC20 token = IERC20(campaign.tokenAddress);
 
         if (oldAmount > newAmountOffered) {
             // return the extra
-            bool success = usdc.transfer(
+            bool success = token.transfer(
                 campaign.creatorAddress,
                 oldAmount - newAmountOffered
             );
@@ -254,35 +327,156 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 platformFees = (campaignOffering * platformFeesPercentage) /
             divider;
         uint256 amountToPayKol = campaignOffering - platformFees;
-        IERC20 usdc = IERC20(baseUsdcAddress);
 
-        if (usdc.balanceOf(address(this)) < amountToPayKol) {
+        IERC20 token = IERC20(campaign.tokenAddress);
+
+        if (token.balanceOf(address(this)) < amountToPayKol) {
             revert ContractBalanceInsufficient(
                 amountToPayKol,
-                usdc.balanceOf(address(this))
+                token.balanceOf(address(this))
             );
         }
 
         campaign.campaignStatus = CampaignStatus.FULFILLED;
 
-        address usdcAddress = baseUsdcAddress;
-
-        bool kolTransfer = IERC20(usdcAddress).transfer(
-            campaign.selectedKol,
-            amountToPayKol
-        );
+        bool kolTransfer = token.transfer(campaign.selectedKol, amountToPayKol);
         if (!kolTransfer) {
             revert FundTransferError();
         }
-        bool ownerTransfer = IERC20(usdcAddress).transfer(
-            owner(),
-            platformFees
-        );
+        bool ownerTransfer = token.transfer(owner(), platformFees);
         if (!ownerTransfer) {
             revert FundTransferError();
         }
 
         emit CampaignFulfilled(campaignId);
+    }
+
+    // ------------------ OPEN CAMPAIGN FUNCTIONS ------------------
+    function createOpenCampaign(
+        uint256 promotionEndsIn,
+        uint256 poolAmount,
+        address tokenAddress
+    ) external nonReentrant {
+        require(allowedTokens[tokenAddress], "Token not allowed");
+        bytes4 id = bytes4(
+            bytes32(
+                keccak256(
+                    abi.encodePacked(
+                        msg.sender,
+                        "CREATE_OPEN_CAMPAIGN",
+                        block.timestamp
+                    )
+                )
+            )
+        );
+
+        OpenCampaign memory campaign = OpenCampaign({
+            id: id,
+            creatorAddress: msg.sender,
+            promotionEndsIn: promotionEndsIn,
+            poolAmount: poolAmount,
+            campaignStatus: OpenCampaignStatus.PUBLISHED,
+            tokenAddress: tokenAddress
+        });
+
+        openCampaignInfo[id] = campaign;
+        allOpenCampaigns.push(id);
+        userOpenCampaigns[msg.sender].push(id);
+
+        // Transfer pool amount to contract externally handled by the frontend
+
+        emit OpenCampaignCreated(id, msg.sender, poolAmount);
+    }
+
+    function completeOpenCampaign(
+        bytes4 campaignId,
+        bool isFulfilled
+    ) external onlyOwner nonReentrant {
+        OpenCampaign storage campaign = openCampaignInfo[campaignId];
+
+        if (campaign.campaignStatus != OpenCampaignStatus.PUBLISHED) {
+            revert InvalidOpenCampaignStatus(
+                OpenCampaignStatus.PUBLISHED,
+                campaign.campaignStatus
+            );
+        }
+
+        campaign.campaignStatus = isFulfilled
+            ? OpenCampaignStatus.FULFILLED
+            : OpenCampaignStatus.DISCARDED;
+
+        // Transfer pool amount to owner for manual distribution
+        IERC20 token = IERC20(campaign.tokenAddress);
+        bool success = token.transfer(owner(), campaign.poolAmount);
+        if (!success) {
+            revert FundTransferError();
+        }
+
+        emit OpenCampaignCompleted(campaignId, msg.sender, isFulfilled);
+    }
+
+    function updateOpenCampaign(
+        bytes4 campaignId,
+        uint256 promotionEndsIn,
+        uint256 poolAmount,
+        OpenCampaignStatus newStatus
+    ) external nonReentrant {
+        OpenCampaign storage campaign = openCampaignInfo[campaignId];
+
+        // Only allow updates if campaign is PUBLISHED
+        if (campaign.campaignStatus != OpenCampaignStatus.PUBLISHED) {
+            revert InvalidOpenCampaignStatus(
+                OpenCampaignStatus.PUBLISHED,
+                campaign.campaignStatus
+            );
+        }
+
+        // Only allow status updates to FULFILLED or DISCARDED
+        if (
+            newStatus != OpenCampaignStatus.FULFILLED &&
+            newStatus != OpenCampaignStatus.DISCARDED
+        ) {
+            revert InvalidOpenCampaignStatus(
+                OpenCampaignStatus.FULFILLED,
+                newStatus
+            );
+        }
+
+        if (campaign.creatorAddress != msg.sender) {
+            revert Unauthorized();
+        }
+
+        uint256 oldAmount = campaign.poolAmount;
+
+        campaign.promotionEndsIn = promotionEndsIn;
+        campaign.poolAmount = poolAmount;
+        campaign.campaignStatus = newStatus;
+
+        IERC20 token = IERC20(campaign.tokenAddress);
+
+        if (oldAmount > poolAmount) {
+            // return the extra
+            bool success = token.transfer(
+                campaign.creatorAddress,
+                oldAmount - poolAmount
+            );
+            if (!success) {
+                revert FundTransferError();
+            }
+        }
+
+        // If status is being updated to FULFILLED or DISCARDED, transfer funds to owner
+        if (
+            newStatus == OpenCampaignStatus.FULFILLED ||
+            newStatus == OpenCampaignStatus.DISCARDED
+        ) {
+            bool success = token.transfer(owner(), poolAmount);
+            if (!success) {
+                revert FundTransferError();
+            }
+        }
+
+        emit OpenCampaignUpdated(campaignId, msg.sender);
     }
 
     // ------------------ GETTERS ------------------
@@ -301,6 +495,23 @@ contract Marketplace is Ownable, ReentrancyGuard {
         bytes4 campaignId
     ) external view returns (Campaign memory) {
         Campaign memory campaign = campaignInfo[campaignId];
+        return campaign;
+    }
+
+    function getAllOpenCampaigns() external view returns (bytes4[] memory) {
+        return allOpenCampaigns;
+    }
+
+    function getUserOpenCampaigns(
+        address userAddress
+    ) external view returns (bytes4[] memory) {
+        return userOpenCampaigns[userAddress];
+    }
+
+    function getOpenCampaignInfo(
+        bytes4 campaignId
+    ) external view returns (OpenCampaign memory) {
+        OpenCampaign memory campaign = openCampaignInfo[campaignId];
         return campaign;
     }
 
