@@ -267,7 +267,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
             );
         }
 
-        if (campaign.creatorAddress != msg.sender) {
+        if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
             revert Unauthorized();
         }
 
@@ -297,7 +297,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     function acceptProjectCampaign(bytes4 campaignId) external nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
 
-        if (campaign.selectedKol != msg.sender) {
+        if (campaign.selectedKol != msg.sender && owner() != msg.sender) {
             revert Unauthorized();
         }
 
@@ -442,7 +442,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
             );
         }
 
-        if (campaign.creatorAddress != msg.sender) {
+        if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
             revert Unauthorized();
         }
 
