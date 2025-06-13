@@ -124,7 +124,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
         platformFeesPercentage = 10_000;
         // USDC Allowed by default
         allowedTokens[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = true;
-        tokenDecimals[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = 18;
+        tokenDecimals[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = 6;
         allowedTokensList.push(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
     }
 
