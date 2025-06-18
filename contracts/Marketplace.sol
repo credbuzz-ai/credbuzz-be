@@ -71,10 +71,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
 
-    mapping(address tokenAddress => bool isTokenAllowed) public allowedTokens;
-    mapping(address tokenAddress => uint256 tokenDecimals) public tokenDecimals;
-    address[] public allowedTokensList;
-
     // ------------------ VARIABLES ------------------
     mapping(address => bool) isUserRegistered;
 
@@ -122,39 +118,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
     // 10000 for 10%
     constructor() Ownable(msg.sender) {
         platformFeesPercentage = 10_000;
-        // USDC Allowed by default
-        allowedTokens[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = true;
-        tokenDecimals[0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913] = 6;
-        allowedTokensList.push(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
     }
 
     // ------------------ OWNER FUNCTIONS ------------------
-    function addAllowedToken(
-        address tokenAddress,
-        uint256 decimals
-    ) external onlyOwner {
-        allowedTokens[tokenAddress] = true;
-        tokenDecimals[tokenAddress] = decimals;
-        allowedTokensList.push(tokenAddress);
-    }
-
-    function removeAllowedToken(address tokenAddress) external onlyOwner {
-        allowedTokens[tokenAddress] = false;
-        for (uint256 i = 0; i < allowedTokensList.length; i++) {
-            if (allowedTokensList[i] == tokenAddress) {
-                allowedTokensList[i] = allowedTokensList[
-                    allowedTokensList.length - 1
-                ];
-                allowedTokensList.pop();
-                break;
-            }
-        }
-    }
-
-    function getAllowedTokens() external view returns (address[] memory) {
-        return allowedTokensList;
-    }
-
     function withdrawToken(address tokenAddress) external onlyOwner {
         uint256 balance = IERC20(tokenAddress).balanceOf(address(this));
 
@@ -180,12 +146,14 @@ contract Marketplace is Ownable, ReentrancyGuard {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
-    function discardCampaign(
-        bytes4 campaignId
-    ) external onlyOwner nonReentrant {
+    function discardCampaign(bytes4 campaignId) external nonReentrant {
         Campaign storage campaign = campaignInfo[campaignId];
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 token = IERC20(campaign.tokenAddress);
+
+        if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
+            revert Unauthorized();
+        }
 
         if (token.balanceOf(address(this)) < amountToReturn) {
             revert ContractBalanceInsufficient(
@@ -215,7 +183,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 offerEndsIn,
         address tokenAddress
     ) external {
-        require(allowedTokens[tokenAddress], "Token not allowed");
         bytes4 id = bytes4(
             bytes32(
                 keccak256(
@@ -357,7 +324,6 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 poolAmount,
         address tokenAddress
     ) external nonReentrant {
-        require(allowedTokens[tokenAddress], "Token not allowed");
         bytes4 id = bytes4(
             bytes32(
                 keccak256(
@@ -391,7 +357,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     function completeOpenCampaign(
         bytes4 campaignId,
         bool isFulfilled
-    ) external onlyOwner nonReentrant {
+    ) external nonReentrant {
         OpenCampaign storage campaign = openCampaignInfo[campaignId];
 
         if (campaign.campaignStatus != OpenCampaignStatus.PUBLISHED) {
@@ -399,6 +365,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
                 OpenCampaignStatus.PUBLISHED,
                 campaign.campaignStatus
             );
+        }
+
+        if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
+            revert Unauthorized();
         }
 
         campaign.campaignStatus = isFulfilled
