@@ -1,16 +1,14 @@
 import {
-  time,
   loadFixture,
+  time,
 } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
 
 // Define enums to match the contract
 enum CampaignStatus {
-  OPEN,
-  ACCEPTED,
+  PUBLISHED,
   FULFILLED,
-  UNFULFILLED,
   DISCARDED,
 }
 
@@ -20,31 +18,67 @@ describe("Marketplace", function () {
     const PLATFORM_FEES = 10_000; // 10%
 
     // Get signers
-    const [owner, project, kol, otherAccount] = await hre.ethers.getSigners();
+    const [owner, creator, kol, otherAccount] = await hre.ethers.getSigners();
+
+    // Deploy mock ERC20 token for testing
+    const MockToken = await hre.ethers.getContractFactory("MockERC20");
+    const mockToken = await MockToken.deploy("Mock Token", "MTK");
 
     // Deploy contract
     const Marketplace = await hre.ethers.getContractFactory("Marketplace");
     const marketplace = await Marketplace.deploy();
 
-    return { marketplace, owner, project, kol, otherAccount, PLATFORM_FEES };
+    // Mint tokens to creator for testing
+    await mockToken.mint(creator.address, hre.ethers.parseEther("1000"));
+    await mockToken.mint(kol.address, hre.ethers.parseEther("1000"));
+
+    return {
+      marketplace,
+      mockToken,
+      owner,
+      creator,
+      kol,
+      otherAccount,
+      PLATFORM_FEES,
+    };
   }
 
   // Add this right after deployMarketplaceFixture
-  async function setupCampaignTest() {
+  async function setupTargetedCampaignTest() {
     const fixture = await loadFixture(deployMarketplaceFixture);
-    const { marketplace, project, kol } = fixture;
-
-    // Register users
-    await marketplace.connect(project).register();
-    await marketplace.connect(kol).register();
+    const { marketplace, mockToken, creator, kol } = fixture;
 
     const currentTime = Math.floor(Date.now() / 1000);
     const campaignData = {
       selectedKol: kol.address,
       offeringAmount: hre.ethers.parseEther("1"),
-      promotionEndsIn: currentTime + 30 * 24 * 60 * 60, // 30 days from now
       offerEndsIn: currentTime + 7 * 24 * 60 * 60, // 7 days from now
+      tokenAddress: mockToken.target,
     };
+
+    // Approve tokens for marketplace
+    await mockToken
+      .connect(creator)
+      .approve(marketplace.target, campaignData.offeringAmount);
+
+    return { ...fixture, campaignData };
+  }
+
+  async function setupPublicCampaignTest() {
+    const fixture = await loadFixture(deployMarketplaceFixture);
+    const { marketplace, mockToken, creator } = fixture;
+
+    const currentTime = Math.floor(Date.now() / 1000);
+    const campaignData = {
+      offerEndsIn: currentTime + 7 * 24 * 60 * 60, // 7 days from now
+      poolAmount: hre.ethers.parseEther("1"),
+      tokenAddress: mockToken.target,
+    };
+
+    // Approve tokens for marketplace
+    await mockToken
+      .connect(creator)
+      .approve(marketplace.target, campaignData.poolAmount);
 
     return { ...fixture, campaignData };
   }
@@ -67,207 +101,351 @@ describe("Marketplace", function () {
     });
   });
 
-  describe("User Management", function () {
-    describe("User Registration", function () {
-      it("Should allow user to register", async function () {
-        const { marketplace, kol } = await loadFixture(
-          deployMarketplaceFixture
+  describe("Targeted Campaign Management", function () {
+    let marketplace: any;
+    let mockToken: any;
+    let creator: any;
+    let kol: any;
+    let owner: any;
+    let campaignData: any;
+    let campaignId: any;
+
+    beforeEach(async function () {
+      const setup = await setupTargetedCampaignTest();
+      marketplace = setup.marketplace;
+      mockToken = setup.mockToken;
+      owner = setup.owner;
+      kol = setup.kol;
+      creator = setup.creator;
+      campaignData = setup.campaignData;
+
+      // Create targeted campaign
+      const tx = await marketplace
+        .connect(creator)
+        .createTargetedCampaign(
+          campaignData.selectedKol,
+          campaignData.offeringAmount,
+          campaignData.offerEndsIn,
+          campaignData.tokenAddress
         );
 
-        await expect(marketplace.connect(kol).register())
-          .to.emit(marketplace, "UserCreated")
-          .withArgs(kol.address);
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(
+        (log: any) => log.fragment && log.fragment.name === "CampaignCreated"
+      );
+      campaignId = event.args[0];
+    });
+
+    it("Should create a new targeted campaign", async function () {
+      const campaigns = await marketplace.getAllTargetedCampaigns();
+      expect(campaigns.length).to.equal(1);
+    });
+
+    it("Should emit CampaignCreated event", async function () {
+      const campaigns = await marketplace.getAllTargetedCampaigns();
+      expect(campaigns[0]).to.equal(campaignId);
+    });
+
+    it("Should set correct campaign status after creation", async function () {
+      const campaign = await marketplace.getTargetedCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.PUBLISHED);
+    });
+
+    it("Should allow creator to update targeted campaign", async function () {
+      const newAmount = hre.ethers.parseEther("2");
+      await mockToken.connect(creator).approve(marketplace.target, newAmount);
+
+      await expect(
+        marketplace
+          .connect(creator)
+          .updateTargetedCampaign(
+            campaignId,
+            kol.address,
+            campaignData.offerEndsIn + 1000,
+            newAmount
+          )
+      )
+        .to.emit(marketplace, "CampaignUpdated")
+        .withArgs(campaignId, creator.address);
+
+      const updatedCampaign = await marketplace.getTargetedCampaignInfo(
+        campaignId
+      );
+      expect(updatedCampaign.amountOffered).to.equal(newAmount);
+    });
+
+    it("Should allow selected KOL to fulfill targeted campaign", async function () {
+      const kolBalanceBefore = await mockToken.balanceOf(kol.address);
+
+      await expect(marketplace.connect(kol).fulfilTargetedCampaign(campaignId))
+        .to.emit(marketplace, "CampaignFulfilled")
+        .withArgs(campaignId, kol.address);
+
+      const campaign = await marketplace.getTargetedCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.FULFILLED);
+
+      // Check KOL received payment (minus platform fees)
+      const kolBalanceAfter = await mockToken.balanceOf(kol.address);
+      const platformFees =
+        (campaignData.offeringAmount * BigInt(10000)) / BigInt(100000);
+      const expectedPayment = campaignData.offeringAmount - platformFees;
+      expect(kolBalanceAfter - kolBalanceBefore).to.equal(expectedPayment);
+    });
+
+    it("Should allow creator to discard targeted campaign", async function () {
+      const creatorBalanceBefore = await mockToken.balanceOf(creator.address);
+
+      await expect(
+        marketplace.connect(creator).discardTargetedCampaign(campaignId)
+      )
+        .to.emit(marketplace, "CampaignDiscarded")
+        .withArgs(campaignId, creator.address);
+
+      const campaign = await marketplace.getTargetedCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.DISCARDED);
+
+      // Check creator received refund
+      const creatorBalanceAfter = await mockToken.balanceOf(creator.address);
+      expect(creatorBalanceAfter - creatorBalanceBefore).to.equal(
+        campaignData.offeringAmount
+      );
+    });
+
+    describe("Targeted Campaign Edge Cases and Failures", function () {
+      it("Should fail when non-selected KOL tries to fulfill campaign", async function () {
+        await expect(
+          marketplace.connect(creator).fulfilTargetedCampaign(campaignId)
+        ).to.be.revertedWithCustomError(marketplace, "Unauthorized");
       });
 
-      it("Should not allow double registration", async function () {
-        const { marketplace, kol } = await loadFixture(
-          deployMarketplaceFixture
-        );
+      it("Should fail to fulfill already fulfilled campaign", async function () {
+        await marketplace.connect(kol).fulfilTargetedCampaign(campaignId);
 
-        await marketplace.connect(kol).register();
-        await expect(marketplace.connect(kol).register())
-          .to.be.revertedWithCustomError(marketplace, "UserAlreadyRegistered")
-          .withArgs(kol.address);
+        await expect(
+          marketplace.connect(kol).fulfilTargetedCampaign(campaignId)
+        )
+          .to.be.revertedWithCustomError(marketplace, "InvalidCampaignStatus")
+          .withArgs(CampaignStatus.PUBLISHED, CampaignStatus.FULFILLED);
+      });
+
+      it("Should fail to fulfill expired campaign", async function () {
+        await time.increaseTo(campaignData.offerEndsIn + 1);
+
+        await expect(
+          marketplace.connect(kol).fulfilTargetedCampaign(campaignId)
+        ).to.be.revertedWithCustomError(marketplace, "CampaignExpired");
+      });
+
+      it("Should fail when non-creator tries to discard campaign", async function () {
+        await expect(
+          marketplace.connect(kol).discardTargetedCampaign(campaignId)
+        ).to.be.revertedWithCustomError(marketplace, "Unauthorized");
       });
     });
   });
 
-  describe("Campaign Management", function () {
+  describe("Public Campaign Management", function () {
     let marketplace: any;
-    let project: any;
-    let kol: any;
+    let mockToken: any;
+    let creator: any;
     let owner: any;
     let campaignData: any;
-    let PLATFORM_FEES: any;
-    let campaigns: any;
+    let campaignId: any;
 
     beforeEach(async function () {
-      const setup = await setupCampaignTest();
+      const setup = await setupPublicCampaignTest();
       marketplace = setup.marketplace;
+      mockToken = setup.mockToken;
       owner = setup.owner;
-      kol = setup.kol;
+      creator = setup.creator;
       campaignData = setup.campaignData;
-      PLATFORM_FEES = setup.PLATFORM_FEES;
-      project = setup.project;
 
-      // Create campaign
-      await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+      // Create public campaign
+      const tx = await marketplace
+        .connect(creator)
+        .createPublicCampaign(
+          campaignData.offerEndsIn,
+          campaignData.poolAmount,
+          campaignData.tokenAddress
         );
 
-      campaigns = await marketplace.getAllCampaigns();
+      const receipt = await tx.wait();
+      const event = receipt.logs.find(
+        (log: any) =>
+          log.fragment && log.fragment.name === "OpenCampaignCreated"
+      );
+      campaignId = event.args[0];
     });
 
-    it("Should create a new campaign", async function () {
+    it("Should create a new public campaign", async function () {
+      const campaigns = await marketplace.getAllPublicCampaigns();
       expect(campaigns.length).to.equal(1);
     });
 
-    it("Should allow owner to update campaign", async function () {
-      await marketplace
-        .connect(project)
-        .updateCampaign(
-          campaigns[0],
-          kol.address,
-          campaignData.promotionEndsIn + 1000,
-          campaignData.offerEndsIn + 1000
-        );
-
-      const updatedCampaign = await marketplace.getCampaignInfo(campaigns[0]);
-      expect(updatedCampaign.promotionEndsIn).to.equal(
-        campaignData.promotionEndsIn + 1000
-      );
-      expect(updatedCampaign.offerEndsIn).to.equal(
-        campaignData.offerEndsIn + 1000
-      );
-    });
-
-    it("Should allow owner to accept campaign", async function () {
-      await expect(
-        marketplace.connect(owner).acceptProjectCampaign(campaigns[0])
-      )
-        .to.emit(marketplace, "CampaignAccepted")
-        .withArgs(campaigns[0], owner.address);
+    it("Should emit OpenCampaignCreated event", async function () {
+      const campaigns = await marketplace.getAllPublicCampaigns();
+      expect(campaigns[0]).to.equal(campaignId);
     });
 
     it("Should set correct campaign status after creation", async function () {
-      const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-      expect(campaign.campaignStatus).to.equal(CampaignStatus.OPEN);
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.PUBLISHED);
     });
 
-    it("Should set correct campaign status after accepting", async function () {
-      await marketplace.connect(owner).acceptProjectCampaign(campaigns[0]);
-      const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-      expect(campaign.campaignStatus).to.equal(CampaignStatus.ACCEPTED);
+    it("Should allow creator to complete public campaign as fulfilled", async function () {
+      await expect(
+        marketplace.connect(creator).completePublicCampaign(campaignId, true)
+      )
+        .to.emit(marketplace, "OpenCampaignCompleted")
+        .withArgs(campaignId, creator.address, true);
+
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.FULFILLED);
     });
 
-    describe("Campaign Edge Cases and Failures", function () {
-      it("Should fail when non-owner tries to accept campaign", async function () {
-        await expect(
-          marketplace.connect(kol).acceptProjectCampaign(campaigns[0])
-        )
-          .to.be.revertedWithCustomError(
-            marketplace,
-            "OwnableUnauthorizedAccount"
-          )
-          .withArgs(kol.address);
-      });
+    it("Should allow creator to complete public campaign as discarded", async function () {
+      await expect(
+        marketplace.connect(creator).completePublicCampaign(campaignId, false)
+      )
+        .to.emit(marketplace, "OpenCampaignCompleted")
+        .withArgs(campaignId, creator.address, false);
 
-      it("Should fail to accept already accepted campaign", async function () {
-        await marketplace.connect(owner).acceptProjectCampaign(campaigns[0]);
-
-        await expect(
-          marketplace.connect(owner).acceptProjectCampaign(campaigns[0])
-        )
-          .to.be.revertedWithCustomError(marketplace, "InvalidCampaignStatus")
-          .withArgs(CampaignStatus.OPEN, CampaignStatus.ACCEPTED);
-      });
-
-      it("Should fail when non-owner tries to fulfill campaign", async function () {
-        await expect(
-          marketplace.connect(project).fulfilProjectCampaign(campaigns[0])
-        )
-          .to.be.revertedWithCustomError(
-            marketplace,
-            "OwnableUnauthorizedAccount"
-          )
-          .withArgs(project.address);
-      });
-
-      it("Should fail to fulfill campaign when not in ACCEPTED state", async function () {
-        await expect(
-          marketplace.connect(owner).fulfilProjectCampaign(campaigns[0])
-        )
-          .to.be.revertedWithCustomError(marketplace, "InvalidCampaignStatus")
-          .withArgs(CampaignStatus.ACCEPTED, CampaignStatus.OPEN);
-      });
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.DISCARDED);
     });
 
-    describe("Campaign Discarding USDC", function () {
-      it("Should allow owner to discard campaign", async function () {
-        await expect(
-          marketplace.connect(owner).discardCampaign(campaigns[0])
-        ).to.be.revertedWithoutReason();
-
-        // await expect(marketplace.connect(owner).discardCampaign(campaigns[0]))
-        //   .to.emit(marketplace, "CampaignDiscarded")
-        //   .withArgs(campaigns[0]);
-        // const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-        // expect(campaign.campaignStatus).to.equal(CampaignStatus.DISCARDED);
-      });
-
-      it("Should fail when non-owner tries to discard campaign", async function () {
-        await expect(marketplace.connect(kol).discardCampaign(campaigns[0]))
-          .to.be.revertedWithCustomError(
-            marketplace,
-            "OwnableUnauthorizedAccount"
-          )
-          .withArgs(kol.address);
-      });
-
-      it("Should fail to discard already discarded campaign", async function () {
-        await expect(
-          marketplace.connect(owner).discardCampaign(campaigns[0])
-        ).to.be.revertedWithoutReason();
-
-        // await marketplace.connect(owner).discardCampaign(campaigns[0]);
-        // await expect(
-        //   marketplace.connect(owner).discardCampaign(campaigns[0])
-        // ).to.be.revertedWithCustomError(marketplace, "CampaignDiscarded");
-      });
-    });
-
-    it("Should handle campaign acceptance after lock period", async function () {
-      const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-      await time.increase(campaign.offerEndsIn);
+    it("Should allow creator to discard public campaign", async function () {
+      const creatorBalanceBefore = await mockToken.balanceOf(creator.address);
 
       await expect(
-        marketplace.connect(owner).acceptProjectCampaign(campaigns[0])
+        marketplace.connect(creator).discardPublicCampaign(campaignId)
       )
-        .to.emit(marketplace, "AcceptanceDeadlineReached")
-        .to.emit(marketplace, "ProjectPaymentReturned");
+        .to.emit(marketplace, "OpenCampaignDiscarded")
+        .withArgs(campaignId, creator.address);
 
-      const updatedCampaign = await marketplace.getCampaignInfo(campaigns[0]);
-      expect(updatedCampaign.campaignStatus).to.equal(CampaignStatus.DISCARDED);
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.DISCARDED);
+
+      // Check creator received refund
+      const creatorBalanceAfter = await mockToken.balanceOf(creator.address);
+      expect(creatorBalanceAfter - creatorBalanceBefore).to.equal(
+        campaignData.poolAmount
+      );
+    });
+
+    it("Should handle public campaign update with reduced amount", async function () {
+      const newAmount = hre.ethers.parseEther("0.5");
+      const creatorBalanceBefore = await mockToken.balanceOf(creator.address);
+
+      await expect(
+        marketplace
+          .connect(creator)
+          .updatePublicCampaign(
+            campaignId,
+            campaignData.offerEndsIn + 1000,
+            newAmount,
+            CampaignStatus.PUBLISHED
+          )
+      )
+        .to.emit(marketplace, "OpenCampaignUpdated")
+        .withArgs(campaignId, creator.address);
+
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.poolAmount).to.equal(newAmount);
+
+      // Check creator received refund for reduced amount
+      const creatorBalanceAfter = await mockToken.balanceOf(creator.address);
+      const refundAmount = campaignData.poolAmount - newAmount;
+      expect(creatorBalanceAfter - creatorBalanceBefore).to.equal(refundAmount);
+    });
+
+    it("Should handle public campaign update with increased amount", async function () {
+      const newAmount = hre.ethers.parseEther("2");
+      await mockToken
+        .connect(creator)
+        .approve(marketplace.target, newAmount - campaignData.poolAmount);
+
+      await expect(
+        marketplace
+          .connect(creator)
+          .updatePublicCampaign(
+            campaignId,
+            campaignData.offerEndsIn + 1000,
+            newAmount,
+            CampaignStatus.PUBLISHED
+          )
+      )
+        .to.emit(marketplace, "OpenCampaignUpdated")
+        .withArgs(campaignId, creator.address);
+
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.poolAmount).to.equal(newAmount);
+    });
+
+    it("Should handle public campaign finalization without double-spending", async function () {
+      const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+
+      // First update to reduce amount (should refund creator)
+      const reducedAmount = hre.ethers.parseEther("0.5");
+      await marketplace
+        .connect(creator)
+        .updatePublicCampaign(
+          campaignId,
+          campaignData.offerEndsIn + 1000,
+          reducedAmount,
+          CampaignStatus.FULFILLED
+        );
+
+      // Check that owner only received the reduced amount, not the original amount
+      const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+      expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(reducedAmount);
+
+      // Verify the campaign is finalized
+      const campaign = await marketplace.getPublicCampaignInfo(campaignId);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.FULFILLED);
+      expect(campaign.poolAmount).to.equal(reducedAmount);
+    });
+
+    describe("Public Campaign Edge Cases and Failures", function () {
+      it("Should fail when non-creator tries to complete campaign", async function () {
+        const [otherAccount] = await hre.ethers.getSigners();
+        await expect(
+          marketplace
+            .connect(otherAccount)
+            .completePublicCampaign(campaignId, true)
+        ).to.be.revertedWithCustomError(marketplace, "Unauthorized");
+      });
+
+      it("Should fail to complete already completed campaign", async function () {
+        await marketplace
+          .connect(creator)
+          .completePublicCampaign(campaignId, true);
+
+        await expect(
+          marketplace.connect(creator).completePublicCampaign(campaignId, true)
+        )
+          .to.be.revertedWithCustomError(marketplace, "InvalidCampaignStatus")
+          .withArgs(CampaignStatus.PUBLISHED, CampaignStatus.FULFILLED);
+      });
+
+      it("Should fail to complete expired campaign", async function () {
+        await time.increaseTo(campaignData.offerEndsIn + 1);
+
+        await expect(
+          marketplace.connect(creator).completePublicCampaign(campaignId, true)
+        ).to.be.revertedWithCustomError(marketplace, "CampaignExpired");
+      });
     });
   });
 
   describe("Platform Management", function () {
     let marketplace: any;
     let owner: any;
-    let newFees: any;
-    let project: any;
 
     beforeEach(async function () {
-      const setup = await setupCampaignTest();
+      const setup = await loadFixture(deployMarketplaceFixture);
       marketplace = setup.marketplace;
       owner = setup.owner;
-      newFees = setup.PLATFORM_FEES;
-      project = setup.project;
     });
 
     it("Should allow owner to update platform fees", async function () {
@@ -279,203 +457,188 @@ describe("Marketplace", function () {
 
       expect(await marketplace.platformFeesPercentage()).to.equal(newFees);
     });
+
+    it("Should allow owner to pause and unpause", async function () {
+      await expect(marketplace.pause())
+        .to.emit(marketplace, "Paused")
+        .withArgs(owner.address);
+
+      await expect(marketplace.unpause())
+        .to.emit(marketplace, "Unpaused")
+        .withArgs(owner.address);
+    });
+
+    it("Should allow owner to withdraw tokens", async function () {
+      const { mockToken, creator } = await loadFixture(
+        deployMarketplaceFixture
+      );
+
+      // Transfer some tokens to marketplace
+      await mockToken
+        .connect(creator)
+        .transfer(marketplace.target, hre.ethers.parseEther("1"));
+
+      const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+
+      await expect(marketplace.withdrawToken(mockToken.target)).to.not.be
+        .reverted;
+
+      const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+      expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(
+        hre.ethers.parseEther("1")
+      );
+    });
   });
 
   describe("Getter Functions", function () {
     let marketplace: any;
+    let mockToken: any;
+    let creator: any;
     let kol: any;
-    let project: any;
-    let campaignData: any;
-    let PLATFORM_FEES: any;
-    let owner: any;
+
     beforeEach(async function () {
-      const setup = await setupCampaignTest();
+      const setup = await setupTargetedCampaignTest();
       marketplace = setup.marketplace;
+      mockToken = setup.mockToken;
+      creator = setup.creator;
       kol = setup.kol;
-      project = setup.project;
-      campaignData = setup.campaignData;
-      PLATFORM_FEES = setup.PLATFORM_FEES;
-      owner = setup.owner;
     });
 
-    it("Should return all registered users", async function () {
-      const users = await marketplace.getAllUsers();
-      expect(users).to.have.lengthOf(2);
-      expect(users).to.include(project.address);
-      expect(users).to.include(kol.address);
-    });
-
-    it("Should return all campaigns", async function () {
+    it("Should return all targeted campaigns", async function () {
       await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+        .connect(creator)
+        .createTargetedCampaign(
+          kol.address,
+          hre.ethers.parseEther("1"),
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          mockToken.target
         );
-      const campaigns = await marketplace.getAllCampaigns();
+
+      const campaigns = await marketplace.getAllTargetedCampaigns();
       expect(campaigns).to.have.lengthOf(1);
     });
 
-    it("Should return user's campaigns", async function () {
+    it("Should return all public campaigns", async function () {
       await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+        .connect(creator)
+        .createPublicCampaign(
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          hre.ethers.parseEther("1"),
+          mockToken.target
         );
 
-      const userCampaigns = await marketplace.getUserCampaigns(project.address);
+      const campaigns = await marketplace.getAllPublicCampaigns();
+      expect(campaigns).to.have.lengthOf(1);
+    });
+
+    it("Should return user's targeted campaigns", async function () {
+      await marketplace
+        .connect(creator)
+        .createTargetedCampaign(
+          kol.address,
+          hre.ethers.parseEther("1"),
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          mockToken.target
+        );
+
+      const userCampaigns = await marketplace.getUserTargetedCampaigns(
+        creator.address
+      );
       expect(userCampaigns).to.have.lengthOf(1);
     });
 
-    it("Should return correct campaign info", async function () {
+    it("Should return user's public campaigns", async function () {
       await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+        .connect(creator)
+        .createPublicCampaign(
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          hre.ethers.parseEther("1"),
+          mockToken.target
         );
 
-      const campaigns = await marketplace.getAllCampaigns();
-
-      const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-
-      // Destructure the returned struct properly
-      const {
-        selectedKol,
-        amountOffered,
-        promotionEndsIn,
-        offerEndsIn,
-        creatorAddress,
-        campaignStatus,
-      } = campaign;
-
-      expect(selectedKol).to.equal(campaignData.selectedKol);
-      expect(amountOffered).to.equal(campaignData.offeringAmount);
-      expect(promotionEndsIn).to.equal(campaignData.promotionEndsIn);
-      expect(offerEndsIn).to.equal(campaignData.offerEndsIn);
-      expect(creatorAddress).to.equal(project.address);
-      expect(campaignStatus).to.equal(CampaignStatus.OPEN);
+      const userCampaigns = await marketplace.getUserPublicCampaigns(
+        creator.address
+      );
+      expect(userCampaigns).to.have.lengthOf(1);
     });
 
-    it("Should return updated campaign info after state changes", async function () {
+    it("Should return correct targeted campaign info", async function () {
+      const offeringAmount = hre.ethers.parseEther("1");
+      const offerEndsIn = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+
       await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+        .connect(creator)
+        .createTargetedCampaign(
+          kol.address,
+          offeringAmount,
+          offerEndsIn,
+          mockToken.target
         );
 
-      const campaigns = await marketplace.getAllCampaigns();
-      await marketplace.connect(owner).acceptProjectCampaign(campaigns[0]);
+      const campaigns = await marketplace.getAllTargetedCampaigns();
+      const campaign = await marketplace.getTargetedCampaignInfo(campaigns[0]);
 
-      const campaign = await marketplace.getCampaignInfo(campaigns[0]);
-
-      // Destructure the returned struct properly
-      const { campaignStatus, selectedKol } = campaign;
-
-      expect(campaignStatus).to.equal(CampaignStatus.ACCEPTED);
-      expect(selectedKol).to.equal(kol.address);
+      expect(campaign.selectedKol).to.equal(kol.address);
+      expect(campaign.amountOffered).to.equal(offeringAmount);
+      expect(campaign.offerEndsIn).to.equal(offerEndsIn);
+      expect(campaign.creatorAddress).to.equal(creator.address);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.PUBLISHED);
+      expect(campaign.tokenAddress).to.equal(mockToken.target);
     });
-  });
 
-  describe("Fund Management and Balance Checks USDC", function () {
-    let marketplace: any;
-    let owner: any;
-    let kol: any;
-    let campaignData: any;
-    let PLATFORM_FEES: any;
-    let campaigns: any;
-    let project: any;
+    it("Should return correct public campaign info", async function () {
+      const poolAmount = hre.ethers.parseEther("1");
+      const offerEndsIn = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
 
-    beforeEach(async function () {
-      const setup = await setupCampaignTest();
-      marketplace = setup.marketplace;
-      owner = setup.owner;
-      kol = setup.kol;
-      campaignData = setup.campaignData;
-      PLATFORM_FEES = setup.PLATFORM_FEES;
-      project = setup.project;
-
-      // Create campaign AFTER we have all the variables initialized
       await marketplace
-        .connect(project)
-        .createNewCampaign(
-          campaignData.selectedKol,
-          campaignData.offeringAmount,
-          campaignData.promotionEndsIn,
-          campaignData.offerEndsIn
+        .connect(creator)
+        .createPublicCampaign(offerEndsIn, poolAmount, mockToken.target);
+
+      const campaigns = await marketplace.getAllPublicCampaigns();
+      const campaign = await marketplace.getPublicCampaignInfo(campaigns[0]);
+
+      expect(campaign.poolAmount).to.equal(poolAmount);
+      expect(campaign.offerEndsIn).to.equal(offerEndsIn);
+      expect(campaign.creatorAddress).to.equal(creator.address);
+      expect(campaign.campaignStatus).to.equal(CampaignStatus.PUBLISHED);
+      expect(campaign.tokenAddress).to.equal(mockToken.target);
+    });
+
+    it("Should check if targeted campaign exists", async function () {
+      await marketplace
+        .connect(creator)
+        .createTargetedCampaign(
+          kol.address,
+          hre.ethers.parseEther("1"),
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          mockToken.target
         );
 
-      // Get campaigns after creation
-      campaigns = await marketplace.getAllCampaigns();
+      const campaigns = await marketplace.getAllTargetedCampaigns();
+      expect(await marketplace.targetedCampaignExists(campaigns[0])).to.be.true;
+      expect(
+        await marketplace.targetedCampaignExists(
+          "0x1234567890123456789012345678901234567890123456789012345678901234"
+        )
+      ).to.be.false;
     });
 
-    it("Should fail to fulfill campaign when contract has insufficient balance", async function () {
-      // Calculate expected payment
-      // const amountToPayKol =
-      //   campaignData.offeringAmount -
-      //   (campaignData.offeringAmount * BigInt(PLATFORM_FEES)) / 100000n;
+    it("Should check if public campaign exists", async function () {
+      await marketplace
+        .connect(creator)
+        .createPublicCampaign(
+          Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
+          hre.ethers.parseEther("1"),
+          mockToken.target
+        );
 
-      await marketplace.connect(owner).acceptProjectCampaign(campaigns[0]);
-
-      // Try to fulfill campaign
-      await expect(
-        marketplace.connect(owner).fulfilProjectCampaign(campaigns[0])
-      ).to.be.revertedWithoutReason();
-      // await expect(
-      //   marketplace.connect(owner).fulfilProjectCampaign(campaigns[0])
-      // )
-      //   .to.be.revertedWithCustomError(
-      //     marketplace,
-      //     "ContractBalanceInsufficient"
-      //   )
-      //   .withArgs(amountToPayKol, 0);
-    });
-
-    it("Should fail to return funds on deadline miss when contract has insufficient balance", async function () {
-      const campaignBefore = await marketplace.getCampaignInfo(campaigns[0]);
-
-      const safetyAmount =
-        (campaignData.offeringAmount * BigInt(PLATFORM_FEES)) / 100000n;
-
-      await marketplace.connect(owner).acceptProjectCampaign(campaigns[0]);
-
-      // Increase time beyond the promotion period
-      await time.increaseTo(campaignBefore.promotionEndsIn + BigInt(1));
-
-      // Try to complete campaign after deadline
-      await expect(
-        marketplace.connect(owner).fulfilProjectCampaign(campaigns[0])
-      ).to.be.revertedWithoutReason();
-      // await expect(
-      //   marketplace.connect(owner).fulfilProjectCampaign(campaigns[0])
-      // )
-      //   .to.be.revertedWithCustomError(
-      //     marketplace,
-      //     "ContractBalanceInsufficient"
-      //   )
-      //   .withArgs(safetyAmount, 0);
-    });
-
-    it("Should fail to discard campaign when contract has insufficient balance", async function () {
-      // Try to discard campaign
-      await expect(
-        marketplace.connect(owner).discardCampaign(campaigns[0])
-      ).to.be.revertedWithoutReason();
-      // .to.be.revertedWithCustomError(
-      //   marketplace,
-      //   "ContractBalanceInsufficient"
-      // )
-      //   .withArgs(campaignData.offeringAmount, 0);
+      const campaigns = await marketplace.getAllPublicCampaigns();
+      expect(await marketplace.publicCampaignExists(campaigns[0])).to.be.true;
+      expect(
+        await marketplace.publicCampaignExists(
+          "0x1234567890123456789012345678901234567890123456789012345678901234"
+        )
+      ).to.be.false;
     });
   });
 });
