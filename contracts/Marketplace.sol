@@ -6,9 +6,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
-struct Campaign {
+struct TargetedCampaign {
     bytes32 id;
-    uint256 createdAt;
     address creatorAddress;
     address selectedKol;
     uint256 offerEndsIn;
@@ -17,19 +16,19 @@ struct Campaign {
     CampaignStatus campaignStatus;
 }
 
-struct OpenCampaign {
+struct PublicCampaign {
     bytes32 id;
     address creatorAddress;
     uint256 offerEndsIn;
     uint256 poolAmount;
-    CampaignStatus campaignStatus;
     address tokenAddress;
+    CampaignStatus campaignStatus;
 }
 
 enum CampaignStatus {
-    PUBLISHED,
-    FULFILLED,
-    DISCARDED
+    Ongoing,
+    Completed,
+    Discarded
 }
 
 // ------------------ ERRORS ------------------
@@ -40,7 +39,6 @@ error ContractBalanceInsufficient(uint256 required, uint256 available);
 
 // AUTHORIZATION ERRORS
 error Unauthorized();
-error InvalidOwnerAddress();
 
 // CAMPAIGN ERRORS
 error InvalidCampaignStatus(CampaignStatus expected, CampaignStatus actual);
@@ -52,54 +50,65 @@ error InvalidAddress(address provided);
 error InvalidAmount(uint256 amount);
 error InvalidDeadline(uint256 deadline, uint256 currentTime);
 error InvalidTokenAddress(address tokenAddress);
-error AmountTooLarge(uint256 amount, uint256 maxAmount);
+error ZeroAddressToken();
+error NotAContract();
+error InvalidERC20Implementation();
 
 contract Marketplace is Ownable, ReentrancyGuard, Pausable {
     // ------------------ GLOBAL CONSTANTS ------------------
     uint256 public platformFeesPercentage; // 10_000 = 10%
     uint256 public constant divider = 100_000;
-    uint256 public constant MAX_AMOUNT = 1e30; // Reasonable upper bound
+    uint256 public MINIMUM_OFFERING = 100; // Minimum 100 tokens required
 
     // ------------------ VARIABLES ------------------
     bytes32[] allCampaigns;
     mapping(address => bytes32[]) userCampaigns;
-    mapping(bytes32 => Campaign) campaignInfo;
+    mapping(bytes32 => TargetedCampaign) campaignInfo;
 
     // Open campaigns
     bytes32[] allOpenCampaigns;
     mapping(address => bytes32[]) userOpenCampaigns;
-    mapping(bytes32 => OpenCampaign) openCampaignInfo;
+    mapping(bytes32 => PublicCampaign) openCampaignInfo;
 
     // ------------------ EVENTS ------------------
     // PLATFORM EVENTS
     event PlatformFeesUpdated(uint256 previousFees, uint256 updatedFees);
+    event MinimumOfferingUpdated(uint256 newMinimumOffering);
 
     // CAMPAIGN EVENTS
-    event CampaignCreated(
+    event TargetedCampaignCreated(
         bytes32 indexed campaignId,
         address user,
         uint256 amount
     );
-    event CampaignFulfilled(bytes32 indexed campaignId, address fulfilledBy);
-    event CampaignDiscarded(bytes32 indexed campaignId, address discardedBy);
-    event CampaignUpdated(bytes32 indexed campaignId, address updatedBy);
+    event TargetedCampaignFulfilled(
+        bytes32 indexed campaignId,
+        address fulfilledBy
+    );
+    event TargetedCampaignDiscarded(
+        bytes32 indexed campaignId,
+        address discardedBy
+    );
+    event TargetedCampaignUpdated(
+        bytes32 indexed campaignId,
+        address updatedBy
+    );
 
-    // Open campaign events
-    event OpenCampaignCreated(
+    // Public campaign events
+    event PublicCampaignCreated(
         bytes32 indexed campaignId,
         address user,
         uint256 poolAmount
     );
-    event OpenCampaignCompleted(
+    event PublicCampaignCompleted(
         bytes32 indexed campaignId,
-        address completedBy,
-        bool isFulfilled
+        address completedBy
     );
-    event OpenCampaignDiscarded(
+    event PublicCampaignDiscarded(
         bytes32 indexed campaignId,
         address discardedBy
     );
-    event OpenCampaignUpdated(bytes32 indexed campaignId, address updatedBy);
+    event PublicCampaignUpdated(bytes32 indexed campaignId, address updatedBy);
 
     // ------------------ CONSTRUCTOR ------------------
     constructor() Ownable(msg.sender) {
@@ -123,9 +132,6 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         }
 
         uint256 balance = IERC20(tokenAddress).balanceOf(address(this));
-        if (balance == 0) {
-            revert InsufficientFundsError(1, 0);
-        }
 
         bool success = IERC20(tokenAddress).transfer(owner(), balance);
         if (!success) {
@@ -135,9 +141,6 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
 
     function withdrawEth() external onlyOwner whenNotPaused {
         uint256 balance = address(this).balance;
-        if (balance == 0) {
-            revert InsufficientFundsError(1, 0);
-        }
 
         (bool success, ) = payable(owner()).call{value: balance}("");
         if (!success) {
@@ -158,6 +161,13 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         emit PlatformFeesUpdated(oldFees, newFees);
     }
 
+    function setMinimumOffering(
+        uint256 newMinimumOffering
+    ) external onlyOwner whenNotPaused {
+        MINIMUM_OFFERING = newMinimumOffering;
+        emit MinimumOfferingUpdated(newMinimumOffering);
+    }
+
     // ------------------ TARGETED CAMPAIGN FUNCTIONS ------------------
     function createTargetedCampaign(
         address selectedKol,
@@ -172,12 +182,11 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         if (offeringAmount == 0) {
             revert InvalidAmount(offeringAmount);
         }
-        if (offeringAmount > MAX_AMOUNT) {
-            revert AmountTooLarge(offeringAmount, MAX_AMOUNT);
+        if (offeringAmount < MINIMUM_OFFERING) {
+            revert InvalidAmount(offeringAmount);
         }
-        if (tokenAddress == address(0)) {
-            revert InvalidTokenAddress(tokenAddress);
-        }
+
+        validateToken(tokenAddress);
 
         uint256 currentTime = block.timestamp;
         if (offerEndsIn <= currentTime) {
@@ -191,6 +200,10 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert InsufficientFundsError(offeringAmount, allowance);
         }
 
+        bytes32 id = keccak256(
+            abi.encode(msg.sender, selectedKol, offeringAmount, block.number)
+        );
+
         // Transfer tokens from creator to contract
         bool transferSuccess = token.transferFrom(
             msg.sender,
@@ -201,36 +214,21 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert FundTransferError();
         }
 
-        bytes32 id = keccak256(
-            abi.encode(
-                msg.sender,
-                selectedKol,
-                offeringAmount,
-                currentTime,
-                block.number,
-                block.timestamp,
-                blockhash(block.number - 1),
-                block.gaslimit,
-                block.coinbase
-            )
-        );
-
-        Campaign memory campaign = Campaign({
+        TargetedCampaign memory campaign = TargetedCampaign({
             id: id,
-            createdAt: currentTime,
             creatorAddress: msg.sender,
             selectedKol: selectedKol,
             offerEndsIn: offerEndsIn,
             amountOffered: offeringAmount,
             tokenAddress: tokenAddress,
-            campaignStatus: CampaignStatus.PUBLISHED
+            campaignStatus: CampaignStatus.Ongoing
         });
 
         campaignInfo[id] = campaign;
         allCampaigns.push(id);
         userCampaigns[msg.sender].push(id);
 
-        emit CampaignCreated(id, msg.sender, offeringAmount);
+        emit TargetedCampaignCreated(id, msg.sender, offeringAmount);
     }
 
     function updateTargetedCampaign(
@@ -246,30 +244,27 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         if (newAmountOffered == 0) {
             revert InvalidAmount(newAmountOffered);
         }
-        if (newAmountOffered > MAX_AMOUNT) {
-            revert AmountTooLarge(newAmountOffered, MAX_AMOUNT);
-        }
 
         uint256 currentTime = block.timestamp;
         if (offerEndsIn <= currentTime) {
             revert InvalidDeadline(offerEndsIn, currentTime);
         }
 
-        Campaign storage campaign = campaignInfo[campaignId];
+        TargetedCampaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
         }
 
-        if (campaign.campaignStatus != CampaignStatus.PUBLISHED) {
-            revert InvalidCampaignStatus(
-                CampaignStatus.PUBLISHED,
-                campaign.campaignStatus
-            );
-        }
-
         if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
             revert Unauthorized();
+        }
+
+        if (campaign.campaignStatus != CampaignStatus.Ongoing) {
+            revert InvalidCampaignStatus(
+                CampaignStatus.Ongoing,
+                campaign.campaignStatus
+            );
         }
 
         uint256 oldAmount = campaign.amountOffered;
@@ -315,13 +310,13 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             }
         }
 
-        emit CampaignUpdated(campaignId, msg.sender);
+        emit TargetedCampaignUpdated(campaignId, msg.sender);
     }
 
     function fulfilTargetedCampaign(
         bytes32 campaignId
     ) external nonReentrant whenNotPaused {
-        Campaign storage campaign = campaignInfo[campaignId];
+        TargetedCampaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
@@ -332,15 +327,16 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert Unauthorized();
         }
 
-        if (campaign.campaignStatus != CampaignStatus.PUBLISHED) {
+        if (campaign.campaignStatus != CampaignStatus.Ongoing) {
             revert InvalidCampaignStatus(
-                CampaignStatus.PUBLISHED,
+                CampaignStatus.Ongoing,
                 campaign.campaignStatus
             );
         }
 
-        // Check if offer deadline has passed
-        if (block.timestamp > campaign.offerEndsIn) {
+        // Check if offer deadline has passed and if the caller is not the owner
+        // Owner can fulfill the campaign even if it has expired
+        if (block.timestamp > campaign.offerEndsIn && owner() != msg.sender) {
             revert CampaignExpired(campaign.offerEndsIn, block.timestamp);
         }
 
@@ -360,7 +356,7 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             );
         }
 
-        campaign.campaignStatus = CampaignStatus.FULFILLED;
+        campaign.campaignStatus = CampaignStatus.Completed;
 
         bool kolTransfer = token.transfer(campaign.selectedKol, amountToPayKol);
         if (!kolTransfer) {
@@ -372,13 +368,13 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert FundTransferError();
         }
 
-        emit CampaignFulfilled(campaignId, msg.sender);
+        emit TargetedCampaignFulfilled(campaignId, msg.sender);
     }
 
     function discardTargetedCampaign(
         bytes32 campaignId
     ) external nonReentrant whenNotPaused {
-        Campaign storage campaign = campaignInfo[campaignId];
+        TargetedCampaign storage campaign = campaignInfo[campaignId];
 
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
@@ -388,12 +384,14 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert Unauthorized();
         }
 
-        if (campaign.campaignStatus != CampaignStatus.PUBLISHED) {
+        if (campaign.campaignStatus != CampaignStatus.Ongoing) {
             revert InvalidCampaignStatus(
-                CampaignStatus.PUBLISHED,
+                CampaignStatus.Ongoing,
                 campaign.campaignStatus
             );
         }
+
+        campaign.campaignStatus = CampaignStatus.Discarded;
 
         uint256 amountToReturn = campaign.amountOffered;
         IERC20 token = IERC20(campaign.tokenAddress);
@@ -405,14 +403,12 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             );
         }
 
-        campaign.campaignStatus = CampaignStatus.DISCARDED;
-
         bool success = token.transfer(campaign.creatorAddress, amountToReturn);
         if (!success) {
             revert FundTransferError();
         }
 
-        emit CampaignDiscarded(campaignId, msg.sender);
+        emit TargetedCampaignDiscarded(campaignId, msg.sender);
     }
 
     // ------------------ PUBLIC CAMPAIGN FUNCTIONS ------------------
@@ -425,12 +421,11 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         if (poolAmount == 0) {
             revert InvalidAmount(poolAmount);
         }
-        if (poolAmount > MAX_AMOUNT) {
-            revert AmountTooLarge(poolAmount, MAX_AMOUNT);
+        if (poolAmount < MINIMUM_OFFERING) {
+            revert InvalidAmount(poolAmount);
         }
-        if (tokenAddress == address(0)) {
-            revert InvalidTokenAddress(tokenAddress);
-        }
+
+        validateToken(tokenAddress);
 
         uint256 currentTime = block.timestamp;
         if (offerEndsIn <= currentTime) {
@@ -444,6 +439,10 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert InsufficientFundsError(poolAmount, allowance);
         }
 
+        bytes32 id = keccak256(
+            abi.encode(msg.sender, poolAmount, block.number)
+        );
+
         // Transfer tokens from creator to contract
         bool transferSuccess = token.transferFrom(
             msg.sender,
@@ -454,25 +453,12 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert FundTransferError();
         }
 
-        bytes32 id = keccak256(
-            abi.encode(
-                msg.sender,
-                poolAmount,
-                currentTime,
-                block.number,
-                block.timestamp,
-                blockhash(block.number - 1),
-                block.gaslimit,
-                block.coinbase
-            )
-        );
-
-        OpenCampaign memory campaign = OpenCampaign({
+        PublicCampaign memory campaign = PublicCampaign({
             id: id,
             creatorAddress: msg.sender,
             offerEndsIn: offerEndsIn,
             poolAmount: poolAmount,
-            campaignStatus: CampaignStatus.PUBLISHED,
+            campaignStatus: CampaignStatus.Ongoing,
             tokenAddress: tokenAddress
         });
 
@@ -480,53 +466,50 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
         allOpenCampaigns.push(id);
         userOpenCampaigns[msg.sender].push(id);
 
-        emit OpenCampaignCreated(id, msg.sender, poolAmount);
+        emit PublicCampaignCreated(id, msg.sender, poolAmount);
     }
 
     function completePublicCampaign(
-        bytes32 campaignId,
-        bool isFulfilled
+        bytes32 campaignId
     ) external nonReentrant whenNotPaused {
-        OpenCampaign storage campaign = openCampaignInfo[campaignId];
+        PublicCampaign storage campaign = openCampaignInfo[campaignId];
 
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
-        }
-
-        if (campaign.campaignStatus != CampaignStatus.PUBLISHED) {
-            revert InvalidCampaignStatus(
-                CampaignStatus.PUBLISHED,
-                campaign.campaignStatus
-            );
         }
 
         if (campaign.creatorAddress != msg.sender && owner() != msg.sender) {
             revert Unauthorized();
         }
 
-        // Check if offer deadline has passed
-        if (block.timestamp > campaign.offerEndsIn) {
+        if (campaign.campaignStatus != CampaignStatus.Ongoing) {
+            revert InvalidCampaignStatus(
+                CampaignStatus.Ongoing,
+                campaign.campaignStatus
+            );
+        }
+
+        // Check if offer deadline has passed and if the caller is not the owner
+        // Owner can complete the campaign even if it has expired
+        if (block.timestamp > campaign.offerEndsIn && owner() != msg.sender) {
             revert CampaignExpired(campaign.offerEndsIn, block.timestamp);
         }
 
-        campaign.campaignStatus = isFulfilled
-            ? CampaignStatus.FULFILLED
-            : CampaignStatus.DISCARDED;
+        campaign.campaignStatus = CampaignStatus.Completed;
 
-        // Transfer pool amount to owner for manual distribution
         IERC20 token = IERC20(campaign.tokenAddress);
         bool success = token.transfer(owner(), campaign.poolAmount);
         if (!success) {
             revert FundTransferError();
         }
 
-        emit OpenCampaignCompleted(campaignId, msg.sender, isFulfilled);
+        emit PublicCampaignCompleted(campaignId, msg.sender);
     }
 
     function discardPublicCampaign(
         bytes32 campaignId
     ) external nonReentrant whenNotPaused {
-        OpenCampaign storage campaign = openCampaignInfo[campaignId];
+        PublicCampaign storage campaign = openCampaignInfo[campaignId];
 
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
@@ -536,12 +519,14 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             revert Unauthorized();
         }
 
-        if (campaign.campaignStatus != CampaignStatus.PUBLISHED) {
+        if (campaign.campaignStatus != CampaignStatus.Ongoing) {
             revert InvalidCampaignStatus(
-                CampaignStatus.PUBLISHED,
+                CampaignStatus.Ongoing,
                 campaign.campaignStatus
             );
         }
+
+        campaign.campaignStatus = CampaignStatus.Discarded;
 
         uint256 amountToReturn = campaign.poolAmount;
         IERC20 token = IERC20(campaign.tokenAddress);
@@ -553,14 +538,12 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
             );
         }
 
-        campaign.campaignStatus = CampaignStatus.DISCARDED;
-
         bool success = token.transfer(campaign.creatorAddress, amountToReturn);
         if (!success) {
             revert FundTransferError();
         }
 
-        emit OpenCampaignDiscarded(campaignId, msg.sender);
+        emit PublicCampaignDiscarded(campaignId, msg.sender);
     }
 
     // ------------------ TARGETED CAMPAIGN GETTERS ------------------
@@ -595,28 +578,12 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
 
     function getTargetedCampaignInfo(
         bytes32 campaignId
-    ) external view returns (Campaign memory) {
-        Campaign memory campaign = campaignInfo[campaignId];
+    ) external view returns (TargetedCampaign memory) {
+        TargetedCampaign memory campaign = campaignInfo[campaignId];
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
         }
         return campaign;
-    }
-
-    function targetedCampaignExists(
-        bytes32 campaignId
-    ) external view returns (bool) {
-        return campaignInfo[campaignId].creatorAddress != address(0);
-    }
-
-    function isTargetedCampaignExpired(
-        bytes32 campaignId
-    ) external view returns (bool) {
-        Campaign memory campaign = campaignInfo[campaignId];
-        if (campaign.creatorAddress == address(0)) {
-            return false;
-        }
-        return block.timestamp > campaign.offerEndsIn;
     }
 
     // ------------------ PUBLIC CAMPAIGN GETTERS ------------------
@@ -651,44 +618,34 @@ contract Marketplace is Ownable, ReentrancyGuard, Pausable {
 
     function getPublicCampaignInfo(
         bytes32 campaignId
-    ) external view returns (OpenCampaign memory) {
-        OpenCampaign memory campaign = openCampaignInfo[campaignId];
+    ) external view returns (PublicCampaign memory) {
+        PublicCampaign memory campaign = openCampaignInfo[campaignId];
         if (campaign.creatorAddress == address(0)) {
             revert CampaignNotFound(campaignId);
         }
         return campaign;
     }
 
-    function publicCampaignExists(
-        bytes32 campaignId
-    ) external view returns (bool) {
-        return openCampaignInfo[campaignId].creatorAddress != address(0);
-    }
-
-    function isPublicCampaignExpired(
-        bytes32 campaignId
-    ) external view returns (bool) {
-        OpenCampaign memory campaign = openCampaignInfo[campaignId];
-        if (campaign.creatorAddress == address(0)) {
-            return false;
-        }
-        return block.timestamp > campaign.offerEndsIn;
-    }
-
     // ------------------ RECEIVE FUNCTION ------------------
     receive() external payable {}
 
     function validateToken(address tokenAddress) internal view {
-        require(tokenAddress != address(0), "Zero address not allowed");
+        if (tokenAddress == address(0)) {
+            revert ZeroAddressToken();
+        }
+
         uint256 size;
         assembly {
             size := extcodesize(tokenAddress)
         }
-        require(size > 0, "Token must be a contract");
+        if (size == 0) {
+            revert NotAContract();
+        }
+
         try IERC20(tokenAddress).totalSupply() returns (uint256) {
             // Token implements ERC20 interface
         } catch {
-            revert("Invalid ERC20 token");
+            revert InvalidERC20Implementation();
         }
     }
 }
